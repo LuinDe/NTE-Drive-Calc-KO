@@ -1,0 +1,58 @@
+# 生成拼图填充和装备组合候选。
+"""Shape combination generation used before board placement solving."""
+
+from typing import List, Dict
+from src.models.equipment import DriveShape
+
+class PuzzleCombinatorics:
+    def __init__(self, shapes_db: Dict[str, DriveShape]):
+        self.shapes_db = shapes_db
+        # Exclude virtual tape shape from physical puzzle
+        self.shape_list = [shape for shape in shapes_db.values() if shape.shape_id != "TAPE_15"]
+
+    def generate_piece_combinations(
+        self,
+        set_shapes: List[str],
+        extra_label: str,
+    ) -> List[List[str]]:
+        """生成填满底盘的驱动组合。
+
+        额外形状是组合择优条件，而非硬性限制：无套装和二件套均可用
+        其他形状补足无法整除的格位。
+        """
+        set_area = sum(self.shapes_db[shape_id].area for shape_id in set_shapes)
+        remain_area = 20 - set_area
+
+        if remain_area < 0:
+            raise ValueError(f"세트 총 면적({set_area}칸)이 보드 상한(20칸)을 넘었습니다!")
+        if remain_area == 0:
+            return [[]]
+
+        all_valid_combos = []
+
+        def find_combinations(target_area: int, current_combo: List[str], start_idx: int):
+            if target_area == 0:
+                all_valid_combos.append(list(current_combo))
+                return
+            for i in range(start_idx, len(self.shape_list)):
+                shape = self.shape_list[i]
+                if target_area - shape.area >= 0:
+                    current_combo.append(shape.shape_id)
+                    find_combinations(target_area - shape.area, current_combo, i)
+                    current_combo.pop()
+
+        find_combinations(remain_area, [], 0)
+
+        if not all_valid_combos:
+            raise ValueError(f"기존 형태 라이브러리로는 정확히 {remain_area}칸인 단품 조합을 만들 수 없습니다!")
+
+        combo_scores = []
+        for combo in all_valid_combos:
+            extra_count = sum(1 for shape_id in combo if self.shapes_db[shape_id].label == extra_label)
+            combo_scores.append((extra_count, combo))
+
+        max_extra_count = max(score[0] for score in combo_scores)
+        best_combos = [score[1] for score in combo_scores if score[0] == max_extra_count]
+        best_combos.sort(key=len)
+
+        return best_combos

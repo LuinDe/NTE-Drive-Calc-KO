@@ -1,0 +1,228 @@
+# 将旧求解器所需的兼容结构完全投影自官方 SQLite。
+"""Static SQLite adapter for the legacy allocation solver.
+
+The solver still uses display names and puzzle matrices internally, but these
+structures are derived only from official static data and account-scoped SQLite
+ weight preferences.  No legacy JSON configuration is read here.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from src.models.equipment import DriveShape
+from src.optimizer.scoring import ScoringEngine
+from src.services.sqlite_allocation_inventory import legacy_shape_id
+from src.services.character_shape_bonus_service import get_effective_character_shape_bonus
+from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
+from src.storage.sqlite.user_data_dao import UserDataDao
+
+
+_LEGACY_SHAPE_LABELS = {
+    "H_2": "Type-2", "V_2": "Type-2",
+    "H_3": "Type-3", "V_3": "Type-3",
+    "L_3_BL": "Type-3", "L_3_TL": "Type-3", "L_3_TR": "Type-3", "L_3_BR": "Type-3",
+    "H_4": "Type-4", "V_4": "Type-4", "Trap_4_H": "Type-4", "Trap_4_V": "Type-4",
+}
+
+
+@dataclass(frozen=True)
+class LegacyAllocationStaticCatalog:
+    roles_db: dict[str, dict[str, Any]]
+    sets_db: dict[str, dict[str, Any]]
+    shapes_db: dict[str, DriveShape]
+    board_matrices: dict[str, list[list[int]]]
+
+
+def _shape_matrix(shape: dict[str, Any]) -> list[list[int]]:
+    cells = list(shape.get("cells") or [])
+    xs = [int(cell["x"]) for cell in cells]
+    ys = [int(cell["y"]) for cell in cells]
+    if not xs or not ys:
+        raise ValueError(f"공식 형태 {shape.get('shape_id')}에 칸 정의가 없습니다")
+    matrix = [[0] * (max(ys) - min(ys) + 1) for _ in range(max(xs) - min(xs) + 1)]
+    for cell in cells:
+        matrix[int(cell["x"]) - min(xs)][int(cell["y"]) - min(ys)] = 1
+    return matrix
+
+
+def _custom_board_matrix(cells: list[dict[str, Any]]) -> list[list[int]]:
+    board = [[-1] * 5 for _ in range(5)]
+    enabled_count = 0
+    for cell in cells:
+        row = int(cell["row_number"]) - 1
+        column = int(cell["column_number"]) - 1
+        if not (0 <= row < 5 and 0 <= column < 5):
+            continue
+        if bool(cell["is_enabled"]):
+            board[row][column] = 0
+            enabled_count += 1
+    if enabled_count != 20:
+        raise ValueError(f"사용자 정의 캐릭터 보드는 20칸이어야 하지만 실제로는 {enabled_count}칸입니다")
+    return board
+
+
+def _custom_weight_labels(
+    record: dict[str, Any], attributes: dict[str, str], field_name: str,
+) -> dict[str, float]:
+    return {
+        attributes[property_id]: float(weight)
+        for property_id, weight in (record.get(field_name) or {}).items()
+        if attributes.get(str(property_id)) and float(weight) > 0
+    }
+
+
+def _likeability_crit_rate_bonus(
+    static_dao: StaticGameDataDao,
+    user_dao: UserDataDao | None,
+    character_id: int,
+) -> float:
+    """Return this account's enabled level-10 affinity CritBase bonus."""
+
+    bonus = static_dao.get_character_likeability_bonus(character_id)
+    if not bonus:
+        return 0.0
+    profile = user_dao.get_character_profile(character_id) if user_dao else None
+    enabled = (
+        bool(profile.get("likeability_level_10_enabled"))
+        if profile is not None
+        else True
+    )
+    if not enabled:
+        return 0.0
+    return sum(
+        float(row.get("value") or 0.0)
+        for row in bonus.get("properties") or ()
+        if str(row.get("property_id") or "") == "CritBase"
+    )
+
+
+def build_legacy_allocation_static_catalog(
+    *, config_dir: str | Path, user_database_path: str | Path | None = None,
+) -> LegacyAllocationStaticCatalog:
+    """Build all old-solver inputs from the static and account SQLite databases."""
+
+    scoring = ScoringEngine(
+        config_dir=str(config_dir), user_database_path=user_database_path,
+    )
+    roles_db: dict[str, dict[str, Any]] = {}
+    sets_db: dict[str, dict[str, Any]] = {}
+    shapes_db: dict[str, DriveShape] = {}
+    board_matrices: dict[str, list[list[int]]] = {}
+    with StaticGameDataDao() as static_dao:
+        characters = static_dao.list_role_template_characters()
+        for suit in static_dao.list_suits():
+            name = str(suit.get("name_zh") or suit["suit_id"])
+            sets_db[name] = {
+                "suit_id": str(suit["suit_id"]),
+                "shapes": [legacy_shape_id(shape_id) for shape_id in suit.get("required_shape_ids") or ()],
+            }
+        for shape in static_dao.list_shapes():
+            legacy_id = legacy_shape_id(shape["shape_id"])
+            shapes_db[legacy_id] = DriveShape(
+                shape_id=legacy_id,
+                label=_LEGACY_SHAPE_LABELS.get(legacy_id, f"Type-{int(shape['cell_count'])}"),
+                matrix=_shape_matrix(shape),
+                area=int(shape["cell_count"]),
+                description=str(shape["shape_id"]),
+            )
+        attributes = {
+            str(attribute["attribute_id"]): ScoringEngine._scoring_property_name(attribute)
+            for attribute in static_dao.list_equipment_attributes()
+        }
+        fork_names = {
+            str(fork.get("fork_id") or ""): str(fork.get("name_zh") or "")
+            for fork in static_dao.list_fork_templates()
+        }
+        graduation_templates = {
+            int(template["character_id"]): template
+            for template in static_dao.list_character_graduation_templates()
+        }
+        user_dao = (
+            UserDataDao(user_database_path)
+            if user_database_path is not None and Path(user_database_path).is_file()
+            else None
+        )
+        try:
+            for character in characters:
+                character_id = int(character["character_id"])
+                role_name = str(character.get("name_zh") or character_id)
+                plan = static_dao.get_equipment_plan(character_id)
+                default_suit = static_dao.get_character_default_suit(character_id)
+                if plan is None or default_suit is None:
+                    continue
+                suit_name = str(default_suit["suit_name_zh"])
+                if suit_name not in sets_db:
+                    raise ValueError(f"캐릭터 [{role_name}]의 공식 기본 세트가 없습니다: {suit_name}")
+                shape_bonus = get_effective_character_shape_bonus(
+                    static_dao, character_id,
+                ) or {}
+                extra_shape_label = str(shape_bonus.get("shape_label") or "")
+                extra_shape_buffs = {
+                    attributes[str(row["property_id"])]: float(row["display_value"])
+                    for row in shape_bonus.get("properties") or ()
+                    if attributes.get(str(row["property_id"]))
+                }
+                scoring_role = scoring.roles_db.get(role_name, {})
+                graduation_template = graduation_templates.get(character_id, {})
+                default_weapon = fork_names.get(
+                    str(graduation_template.get("fork_id") or ""),
+                    "",
+                )
+                roles_db[role_name] = {
+                    "character_id": character_id,
+                    "default_set": suit_name,
+                    "default_weapon": default_weapon,
+                    "likeability_crit_rate_bonus": _likeability_crit_rate_bonus(
+                        static_dao, user_dao, character_id,
+                    ),
+                    "extra_shape_label": extra_shape_label,
+                    "extra_shape_buffs": extra_shape_buffs,
+                    "weights": dict(scoring_role.get("weights") or {}),
+                    "main_weights": dict(scoring_role.get("main_weights") or {}),
+                }
+                board = [[-1] * 5 for _ in range(5)]
+                for cell in plan.get("cells") or ():
+                    board[int(cell["row"]) - 1][int(cell["column"]) - 1] = 0
+                board_matrices[role_name] = board
+            if user_dao is not None:
+                suit_name_by_id = {
+                    str(data["suit_id"]): name for name, data in sets_db.items()
+                }
+                for custom in user_dao.list_custom_characters():
+                    character_id = int(custom["character_id"])
+                    role_name = str(custom.get("name_zh") or character_id)
+                    weights = user_dao.get_character_weight_preferences(character_id) or {}
+                    shape_bonus = custom.get("shape_bonus") or {}
+                    extra_shape_buffs = {
+                        attributes[str(row["property_id"])]: float(row["display_value"])
+                        for row in shape_bonus.get("properties") or ()
+                        if attributes.get(str(row["property_id"]))
+                    }
+                    roles_db[role_name] = {
+                        "character_id": character_id,
+                        "default_set": suit_name_by_id.get(
+                            str(custom.get("target_suit_id") or ""), ""
+                        ),
+                        "default_weapon": "",
+                        "extra_shape_label": str(
+                            shape_bonus.get("shape_label") or "Type-3"
+                        ),
+                        "extra_shape_buffs": extra_shape_buffs,
+                        "weights": _custom_weight_labels(
+                            weights, attributes, "property_weights"
+                        ),
+                        "main_weights": _custom_weight_labels(
+                            weights, attributes, "main_property_weights"
+                        ),
+                        "is_custom": True,
+                    }
+                    board_matrices[role_name] = _custom_board_matrix(
+                        list(custom.get("board_cells") or ())
+                    )
+        finally:
+            if user_dao is not None:
+                user_dao.close()
+    return LegacyAllocationStaticCatalog(roles_db, sets_db, shapes_db, board_matrices)

@@ -1,0 +1,228 @@
+# 基于不可变上下文复用既有推荐算法，生成 Top-K 与 UID 唯一分配。
+"""Public Top-K facade for the existing allocation recommendation pipeline."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from src.domain.drive_layout import matrix_groups_in_scan_order
+from src.services.allocation_context import AllocationCandidate, AllocationContext, AllocationRolePreference
+
+
+class AllocationSolverError(RuntimeError):
+    """The frozen context cannot produce a safe, complete allocation."""
+
+
+@dataclass(frozen=True, slots=True)
+class StatContribution:
+    property_id: str
+    source: str
+    raw_value: float
+    normalized_value: float
+    weight: float
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
+class AllocationAssignment:
+    uid: tuple[int, int]
+    kind: str
+    item_id: str
+    suit_id: str | None
+    geometry: str | None
+    board_cells: tuple[tuple[int, int], ...]
+    official_recommendation_item_id: str | None
+    score: float
+    contributions: tuple[StatContribution, ...]
+    compatibility: tuple[str, ...]
+    virtual: bool = False
+    grid_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoleAllocationOption:
+    character_id: int
+    rank: int
+    score: float
+    priority_values: tuple[float, ...]
+    assignments: tuple[AllocationAssignment, ...]
+    generated_board: tuple[tuple[str | int, ...], ...]
+    satisfied_constraints: tuple[str, ...]
+    missing_core_reason: str | None = None
+
+    @property
+    def used_uids(self) -> frozenset[tuple[int, int]]:
+        return frozenset(assignment.uid for assignment in self.assignments)
+
+
+@dataclass(frozen=True, slots=True)
+class RoleTopK:
+    character_id: int
+    options: tuple[RoleAllocationOption, ...]
+    rejection_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class UnifiedAllocation:
+    strategy: str
+    total_score: float
+    selected: tuple[RoleAllocationOption, ...]
+    unassigned_character_ids: tuple[int, ...]
+    explanation: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AllocationSolveResult:
+    snapshot_id: int
+    profile_id: int
+    profile_version: int
+    solver_version: str
+    top_k: int
+    role_top_k: tuple[RoleTopK, ...]
+    unified: UnifiedAllocation
+
+
+def _contributions(candidate: AllocationCandidate, role: AllocationRolePreference) -> tuple[StatContribution, ...]:
+    """Explain matching stat kinds without replacing ScoringEngine's total."""
+
+    weights = dict(role.effective_property_weights)
+    return tuple(
+        StatContribution(stat.property_id, source, float(stat.value), 1.0, float(weights[stat.property_id]), 0.0)
+        for source, stats in (("main", candidate.main_stats), ("sub", candidate.sub_stats))
+        for stat in stats if stat.property_id in weights
+    )
+
+
+def _option(role: AllocationRolePreference, run, *, rank: int) -> RoleAllocationOption | None:
+    plan = run.plans.get(run.role_key(role.character_id)) or {}
+    if not plan.get("valid"):
+        return None
+    board = tuple(tuple(row) for row in (plan.get("blueprint") or {}).get("board", ()))
+    groups_by_shape: dict[str, list[tuple[tuple[int, int], ...]]] = {}
+    for shape_id, cells in matrix_groups_in_scan_order(
+        [[str(cell) for cell in row] for row in board]
+    ):
+        groups_by_shape.setdefault(
+            str(shape_id).strip().casefold(), []
+        ).append(tuple(cells))
+    assignments: list[AllocationAssignment] = []
+    role_key = run.role_key(role.character_id)
+    tape = plan.get("assigned_tape")
+    if tape is not None:
+        item = run.candidates_by_legacy_uid[tape.uid]
+        assignments.append(AllocationAssignment(item.uid, "core", item.item_id, item.suit_id, None, (), None,
+            float(tape.role_scores.get(role_key, 0.0)), _contributions(item, role),
+            ("ScoringEngine 표준화 코어 점수", "사용자 코어 메인 스탯 필터"),
+            grid_count=item.grid_count))
+    for drives, slot_label in ((plan.get("assigned_set_drives", ()) or (), "세트 필수 형태"),
+                               (plan.get("assigned_extra_drives", ()) or (), "추가 형태")):
+        for drive in drives:
+            item = run.candidates_by_legacy_uid[drive.uid]
+            shape_groups = groups_by_shape.get(
+                str(drive.shape_id).strip().casefold(), []
+            )
+            if not shape_groups:
+                raise AllocationSolverError(
+                    f"캐릭터 {role.character_id}의 청사진이 드라이브 형태 {drive.shape_id}에 독립 블록을 분배할 수 없습니다"
+                )
+            assignments.append(AllocationAssignment(item.uid, "module", item.item_id, item.suit_id, item.geometry,
+                shape_groups.pop(0), None,
+                float(drive.role_scores.get(role_key, 0.0)), _contributions(item, role),
+                ("ScoringEngine 표준화 드라이브 점수", "PuzzleCombinatorics + DFSPuzzleSolver", slot_label),
+                grid_count=item.grid_count))
+    if any(groups for groups in groups_by_shape.values()):
+        raise AllocationSolverError(f"캐릭터 {role.character_id}의 청사진에 바인딩되지 않은 드라이브 블록이 있습니다")
+    if not assignments:
+        return None
+    return RoleAllocationOption(
+        role.character_id,
+        rank,
+        float(plan.get("score", 0.0)),
+        (),
+        tuple(assignments),
+        board,
+        (
+            "공식 20칸 보드",
+            "공식 형태 좌표",
+            "PuzzleCombinatorics + DFSPuzzleSolver",
+            "ScoringEngine",
+            "공식 장비 세팅 프리셋은 선별에 참여하지 않음",
+        ),
+        str(plan.get("missing_core_reason") or "") or None,
+    )
+
+
+def _top_k(
+    context: AllocationContext, role: AllocationRolePreference, count: int, *, allow_missing_core: bool = False,
+) -> RoleTopK:
+    """Branch by UID exclusion and rerun the original one-role strategy."""
+
+    from heapq import heappop, heappush
+    from itertools import count as counter
+    from src.services.allocation_legacy_adapter import run_legacy_allocation
+
+    serial = counter()
+    queue: list[tuple[float, int, frozenset[tuple[int, int]], RoleAllocationOption]] = []
+    seen_exclusions: set[frozenset[tuple[int, int]]] = set()
+
+    def enqueue(excluded: frozenset[tuple[int, int]]) -> None:
+        if excluded in seen_exclusions:
+            return
+        seen_exclusions.add(excluded)
+        option = _option(
+            role,
+            run_legacy_allocation(
+                context, roles=(role,), excluded_uids=excluded, allow_missing_core=allow_missing_core,
+            ),
+            rank=0,
+        )
+        if option is not None:
+            heappush(queue, (-option.score, next(serial), excluded, option))
+
+    enqueue(frozenset())
+    options: list[RoleAllocationOption] = []
+    fingerprints: set[frozenset[tuple[int, int]]] = set()
+    while queue and len(options) < count:
+        _score, _serial, excluded, option = heappop(queue)
+        if option.used_uids in fingerprints:
+            continue
+        fingerprints.add(option.used_uids)
+        options.append(RoleAllocationOption(option.character_id, len(options) + 1, option.score,
+            option.priority_values, option.assignments, option.generated_board,
+            option.satisfied_constraints, option.missing_core_reason))
+        for uid in option.used_uids:
+            enqueue(excluded | {uid})
+    return RoleTopK(role.character_id, tuple(options), None if options else "기존 솔버가 제약을 만족하는 완전한 후보를 생성하지 못했습니다")
+
+
+def solve_allocation_context(context: AllocationContext, *, top_k: int = 5, include_role_top_k: bool = True,
+                             role_search_limit: int = 20_000, global_search_limit: int = 100_000,
+                             allow_missing_core: bool = False) -> AllocationSolveResult:
+    """Run the established scorer, puzzle solver and strategy dispatcher via Context."""
+
+    del role_search_limit, global_search_limit
+    if not isinstance(context, AllocationContext):
+        raise TypeError("솔버는 불변 AllocationContext만 받습니다")
+    if not isinstance(top_k, int) or not 1 <= top_k <= 20:
+        raise ValueError("top_k는 1에서 20 사이의 정수여야 합니다")
+    if not context.shapes or not context.suits or not context.attributes:
+        raise AllocationSolverError("AllocationContext에 기존 솔버가 필요로 하는 형태, 세트 또는 속성 매핑이 없습니다")
+    from src.services.allocation_legacy_adapter import run_legacy_allocation
+
+    role_top_k = (
+        tuple(_top_k(context, role, top_k, allow_missing_core=allow_missing_core) for role in context.roles)
+        if include_role_top_k else ()
+    )
+    run = run_legacy_allocation(context, allow_missing_core=allow_missing_core)
+    selected = tuple(option for role in context.roles if (option := _option(role, run, rank=1)) is not None)
+    uids = [uid for option in selected for uid in option.used_uids]
+    if len(uids) != len(set(uids)):
+        raise AllocationSolverError("기존 분배 전략이 중복된 원본 장비 UID를 반환했습니다")
+    selected_ids = {option.character_id for option in selected}
+    return AllocationSolveResult(context.snapshot.snapshot_id, context.profile_id, context.profile_version,
+        context.solver_version, top_k, role_top_k,
+        UnifiedAllocation(context.allocation_strategy, sum(option.score for option in selected), selected,
+            tuple(role.character_id for role in context.roles if role.character_id not in selected_ids),
+            ("모든 입력은 같은 불변 AllocationContext에서 옴",
+             "점수, 청사진, 세 가지 전략은 기존 ScoringEngine / 솔버 / DispatcherEngine을 직접 재사용",
+             "공식 장비 세팅 프리셋은 선별에 참여하지 않음; 캐릭터 간 원본 UID 중복 없음")))

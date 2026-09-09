@@ -1,0 +1,80 @@
+# 定义主窗口侧边栏导航项。
+"""Navigation metadata for the main window stack."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class NavItem:
+    key: str
+    label: str
+    button_attr: str
+    page_builder: str
+    refresh_method: str | None = None
+    sidebar: bool = True
+    parent_key: str | None = None
+
+
+NAV_ITEMS = (
+    NavItem("home", "작업 공간", "btn_home", "_page_home", "_refresh_home"),
+    NavItem("execute", "⚡  계산", "btn_exec", "_page_execute", "_refresh_execute"),
+    NavItem("equipment", "💎  장비 세팅", "btn_equip", "_page_equipment", "_refresh_equip"),
+    NavItem("my_role", "👤  캐릭터", "btn_my_role", "_page_my_role", "_refresh_my_role"),
+    NavItem("warehouse", "📦  창고", "btn_warehouse", "_page_warehouse", "_refresh_warehouse"),
+    NavItem(
+        "identify",
+        "🔍  감정",
+        "btn_identify",
+        "_page_identify",
+        "_refresh_identify_options",
+    ),
+    NavItem(
+        "battle_report",
+        "📊  전투 리포트",
+        "btn_battle_report",
+        "_page_battle_report",
+    ),
+    NavItem(
+        "blueprint",
+        "캐릭터 청사진",
+        "btn_blueprint",
+        "_page_blueprint",
+        "_refresh_blueprints",
+        sidebar=False,
+        parent_key="my_role",
+    ),
+    NavItem(
+        "config",
+        "기본 가중치",
+        "btn_config",
+        "_page_config",
+        "_refresh_config_forms",
+        sidebar=False,
+        parent_key="my_role",
+    ),
+    NavItem("toolbox", "🧰  도구", "btn_toolbox", "_page_toolbox", "_refresh_toolbox"),
+    NavItem(
+        "static_catalog",
+        "게임 자료실",
+        "btn_static_catalog",
+        "_page_static_catalog",
+        "_refresh_static_catalog",
+        sidebar=False,
+        parent_key="toolbox",
+    ),
+    NavItem("settings", "🔧  설정", "btn_settings", "_page_settings"),
+)
+
+
+def nav_index_map() -> dict[str, int]:
+    return {item.key: index for index, item in enumerate(NAV_ITEMS)}
+
+
+def nav_item_by_key(key: str) -> NavItem | None:
+    return next((item for item in NAV_ITEMS if item.key == key), None)
+
+
+def sidebar_nav_items() -> tuple[NavItem, ...]:
+    return tuple(item for item in NAV_ITEMS if item.sidebar)

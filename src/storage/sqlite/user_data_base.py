@@ -1,0 +1,218 @@
+# 提供用户数据 SQLite 的连接、迁移与基础工具。
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterable
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Self
+
+from .user_data_support import (
+    BASE_SCHEMA_VERSION,
+    DEFAULT_SCHEMA_PATH,
+    USER_MIGRATIONS,
+    SCHEMA_VERSION,
+    UserDataError,
+    _utc_now,
+)
+
+class UserDataDaoCore:
+    """单个应用账号所拥有数据的读写边界。
+
+    数据库只保存原始游戏 ID，不映射到旧 JSON 名称，也不重复保存静态显示数据。
+    """
+
+    def __init__(
+        self,
+        database_path: str | Path,
+        *,
+        account_id: str | None = None,
+        account_name: str | None = None,
+        schema_path: str | Path = DEFAULT_SCHEMA_PATH,
+    ) -> None:
+        self.database_path = Path(database_path).expanduser().resolve()
+        existed = self.database_path.is_file()
+        if not existed and not account_id:
+            raise UserDataError("사용자 데이터베이스를 만들 때는 account_id를 제공해야 합니다")
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._connection: sqlite3.Connection | None = sqlite3.connect(
+                self.database_path, timeout=10.0
+            )
+        except sqlite3.Error as exc:
+            raise UserDataError(f"사용자 데이터베이스를 열 수 없습니다: {self.database_path}") from exc
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA busy_timeout = 10000")
+        try:
+            if not existed:
+                self._initialize(
+                    Path(schema_path),
+                    account_id=str(account_id),
+                    account_name=str(account_name or account_id),
+                )
+            self._migrate_schema()
+            self._validate_schema()
+        except BaseException:
+            self.close()
+            if not existed:
+                self.database_path.unlink(missing_ok=True)
+            raise
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            connection.close()
+            self._connection = None
+
+    def _db(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise UserDataError("사용자 데이터베이스 DAO가 닫혔습니다")
+        return self._connection
+
+    def _initialize(self, schema_path: Path, *, account_id: str, account_name: str) -> None:
+        if not schema_path.is_file():
+            raise UserDataError(f"사용자 데이터베이스 구조 파일이 없습니다: {schema_path}")
+        connection = self._db()
+        try:
+            connection.executescript(schema_path.read_text(encoding="utf-8"))
+            now = _utc_now()
+            connection.execute(
+                "INSERT INTO schema_migration(version, applied_at_utc) VALUES (?, ?)",
+                (BASE_SCHEMA_VERSION, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO database_profile(
+                    singleton_id, account_id, account_name, created_at_utc, updated_at_utc
+                ) VALUES (1, ?, ?, ?, ?)
+                """,
+                (account_id, account_name, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO sync_settings(
+                    singleton_id, inventory_sync_method, equipment_apply_method,
+                    capture_device_id, raw_capture_enabled,
+                    inventory_settle_seconds, updated_at_utc
+                ) VALUES (1, 'nte_core', 'nte_core', NULL, 0, 5.0, ?)
+                """,
+                (now,),
+            )
+            connection.commit()
+            connection.execute("PRAGMA journal_mode = WAL")
+        except (OSError, sqlite3.Error) as exc:
+            raise UserDataError("사용자 데이터베이스를 초기화할 수 없습니다") from exc
+
+    def _migrate_schema(self) -> None:
+        connection = self._db()
+        try:
+            row = connection.execute(
+                "SELECT MAX(version) AS version FROM schema_migration"
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise UserDataError("파일이 NTE 사용자 데이터베이스가 아닙니다") from exc
+        version = int(row["version"] or 0) if row is not None else 0
+        if version > SCHEMA_VERSION:
+            raise UserDataError(
+                f"사용자 데이터베이스 구조 버전 {version}이(가) 현재 프로그램이 지원하는 {SCHEMA_VERSION}보다 높습니다"
+            )
+        try:
+            for target_version in range(version + 1, SCHEMA_VERSION + 1):
+                migration_path = USER_MIGRATIONS.get(target_version)
+                if migration_path is None or not migration_path.is_file():
+                    raise UserDataError(f"사용자 데이터베이스 마이그레이션 스크립트가 없습니다: v{target_version}")
+                migration_sql = migration_path.read_text(encoding="utf-8")
+                rebuilds_foreign_key_parent = migration_sql.startswith(
+                    "-- requires-foreign-keys-off"
+                )
+                if rebuilds_foreign_key_parent:
+                    connection.execute("PRAGMA foreign_keys = OFF")
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._prepare_migration(connection, target_version)
+                    self._execute_migration_script(connection, migration_sql)
+                    connection.execute(
+                        "INSERT INTO schema_migration(version, applied_at_utc) VALUES (?, ?)",
+                        (target_version, _utc_now()),
+                    )
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
+                finally:
+                    if rebuilds_foreign_key_parent:
+                        connection.execute("PRAGMA foreign_keys = ON")
+                if rebuilds_foreign_key_parent:
+                    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                    if violations:
+                        raise UserDataError(
+                            f"사용자 데이터베이스 마이그레이션 v{target_version}에서 외래 키 오류가 발생했습니다"
+                        )
+        except (OSError, sqlite3.Error) as exc:
+            connection.rollback()
+            raise UserDataError("사용자 데이터베이스 구조를 업그레이드할 수 없습니다") from exc
+
+    @staticmethod
+    def _prepare_migration(
+        connection: sqlite3.Connection,
+        target_version: int,
+    ) -> None:
+        """在同一迁移事务内修复会阻断后续 DDL 的历史存储形态。"""
+
+        if target_version != 35:
+            return
+        # v32 通过 ADD COLUMN 引入普通抗性；旧行只在读取时获得 0.2 默认值，
+        # 部分 SQLite 版本会在下一次 ALTER TABLE 时把未物化的值判为 NULL。
+        # 自赋值保留所有有效值，并把虚拟默认值物化；失败时随 v35 一起回滚。
+        connection.execute(
+            """
+            UPDATE battle_target_condition
+            SET resistance_normal = COALESCE(resistance_normal, 0.2)
+            """
+        )
+
+    @staticmethod
+    def _execute_migration_script(connection: sqlite3.Connection, script: str) -> None:
+        """在调用方已经开启的事务中逐条执行迁移 SQL，避免 executescript 隐式提交。"""
+
+        statement = ""
+        for line in script.splitlines(keepends=True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                if statement.strip():
+                    connection.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise UserDataError("사용자 데이터베이스 마이그레이션 스크립트에 끝나지 않은 SQL 문이 있습니다")
+
+    def _validate_schema(self) -> None:
+        try:
+            row = self._db().execute(
+                "SELECT MAX(version) AS version FROM schema_migration"
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise UserDataError("파일이 NTE 사용자 데이터베이스가 아닙니다") from exc
+        version = row["version"] if row is not None else None
+        if version != SCHEMA_VERSION:
+            raise UserDataError(
+                f"지원하지 않는 사용자 데이터베이스 구조 버전: {version!r}; {SCHEMA_VERSION}이 필요합니다"
+            )
+
+    def _rows(self, sql: str, parameters: Iterable[Any] = ()) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._db().execute(sql, tuple(parameters))]
+
+    def _one(self, sql: str, parameters: Iterable[Any] = ()) -> dict[str, Any] | None:
+        row = self._db().execute(sql, tuple(parameters)).fetchone()
+        return dict(row) if row is not None else None

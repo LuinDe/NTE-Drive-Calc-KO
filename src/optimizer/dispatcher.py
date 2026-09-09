@@ -1,0 +1,68 @@
+# 分配算法的调度入口。
+"""Dispatch facade that selects the requested allocation strategy."""
+
+from src.optimizer.role_priority_strategy import RolePriorityStrategy
+from src.optimizer.contracts import (
+    AllocationResult,
+    CandidatePool,
+    CustomSetMap,
+    StatPriorityConfigMap,
+    STRATEGY_MODES,
+    StrategyMode,
+)
+from src.domain.stat_catalog import StatCatalog
+
+
+class DispatcherEngine:
+
+    def __init__(
+        self,
+        roles_db: dict,
+        sets_db: dict,
+        blueprints_db: dict[str, list[dict]],
+        *,
+        core_set_targets: dict[str, str | None] | None = None,
+        stat_catalog: StatCatalog | None = None,
+        blueprint_combo_limit: int = 500,
+        cancel_check=None,
+    ):
+        strategy = RolePriorityStrategy(
+                roles_db,
+                sets_db,
+                blueprints_db,
+                core_set_targets=core_set_targets,
+                stat_catalog=stat_catalog,
+            )
+        strategy.configure_execution(
+            combo_limit=blueprint_combo_limit,
+            cancel_check=cancel_check,
+        )
+        self.strategies = {"role_priority": strategy}
+
+    def execute_dispatch(
+        self,
+        mode: StrategyMode | str,
+        candidate_pool: CandidatePool,
+        priority_list: list[str],
+        custom_sets: CustomSetMap = None,
+        crit_priority_modes: StatPriorityConfigMap = None,
+        priority_groups: list[list[str]] | None = None,
+        crit_rate_caps: dict[str, float] | None = None,
+    ) -> AllocationResult:
+        custom_sets = custom_sets or {}
+        crit_priority_modes = crit_priority_modes or {}
+        crit_rate_caps = crit_rate_caps or {}
+        strategy = self.strategies.get(mode)
+
+        if not strategy:
+            raise ValueError(f"알 수 없는 스케줄 모드 [{mode}], 지원 모드: {list(STRATEGY_MODES)}")
+
+        if mode == "role_priority":
+            return strategy.execute(
+                candidate_pool,
+                priority_list,
+                custom_sets,
+                crit_priority_modes,
+                priority_groups=priority_groups,
+                crit_rate_caps=crit_rate_caps,
+            )
