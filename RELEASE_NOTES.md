@@ -20,6 +20,12 @@ NTE Drive Calc **2.2.1** 한국어 패치입니다. 원작자의 허락을 받�
 
 스킬·서브 스킬·각성·공명 이름은 한국 서버 공식 명칭을 사용했습니다.
 
+## 이번 업데이트
+
+- **링코 공식 명칭 반영** — 한국 서버 정식 출시에 맞춰 각성 8종과 스킬·메커니즘 명칭을 공식 표기로 교체했습니다.
+- 공식 2.2.1 최신 빌드에 맞춰 재빌드했습니다. 이전 빌드를 쓰시던 분도 그대로 설치됩니다.
+- 새로 추가된 화면 문자열 18개를 번역했습니다.
+
 ## 알아두실 점
 
 - 게임 클라이언트 언어는 **简体中文**로 두셔야 스캔/감정(OCR)이 동작합니다.
@@ -28,9 +34,9 @@ NTE Drive Calc **2.2.1** 한국어 패치입니다. 원작자의 허락을 받�
 ## SHA256
 
 ```
-2a9eabc6fbba2e24685423c2d1202e21374c7fc8fa77519d114a0ae60085686c  NTE_Drive_Calc_2.2.1_KO_Patch_Setup.exe
-70fd920f72745336f7947b843926f06c80684aaf999be4ecd4fb2c09de515978  패치된 NTE_Drive_Calc.exe
-7273d344e5ae046d95d8900e06f61fd2a6d2653234c5071ffb10ec36fb87ee69  공식 2.2.1 원본 (패치 전)
+b2b5b357aae9130a443af2b027107d282189854d9ec8174e24d48ea698e17000  NTE_Drive_Calc_2.2.1_KO_Patch_Setup.exe
+2193227bbfaf2f89b9252d564ad958b0a195fa4f9188dec77c64d4d1cd2025d0  패치된 NTE_Drive_Calc.exe
+63a10097c65f002969c7fda4c37a661f0691eb1223cd92f41eef277c28f22cec  공식 2.2.1 원본 (패치 전)
 ```
 
 설치 후 직접 확인하실 수 있습니다.
@@ -42,7 +48,7 @@ certutil -hashfile "C:\Program Files\NTE Drive Calc\NTE_Drive_Calc.exe" SHA256
 ## 라이선스
 
 NTE Drive Calc는 **AGPL-3.0**으로 배포되는 프로그램이며 이 패치는 그 파생물입니다. 이 릴리스의
-실행 파일에 대응하는 소스는 같은 태그의 [`src/`](../../tree/v2.2.1-ko.1/src)에 있습니다.
-자세한 고지는 [SOURCE_OFFER.md](../../blob/v2.2.1-ko.1/SOURCE_OFFER.md)를 참고하세요.
+실행 파일에 대응하는 소스는 같은 태그의 [`src/`](../../tree/v2.2.1-ko.2/src)에 있습니다.
+자세한 고지는 [SOURCE_OFFER.md](../../blob/v2.2.1-ko.2/SOURCE_OFFER.md)를 참고하세요.
 
 원저작권: NTE Drive Calc contributors ([@hxwd94666](https://github.com/hxwd94666))

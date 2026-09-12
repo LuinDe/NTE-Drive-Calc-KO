@@ -5,17 +5,18 @@ AGPL-3.0 §5, §13 이행을 위한 고지입니다.
 ## 상류 저작물 / Upstream
 
 - 저장소: https://github.com/hxwd94666/NTE-Drive-Calc
-- 기준 커밋: `e09cf84d750dc17adfcfcc528c04002b678fea94` (버전 2.2.1)
+- 기준 커밋: `7b4293c` (버전 2.2.1 + 계산 오류 핫픽스)
 - 저작권: NTE Drive Calc contributors
 - 라이선스: GNU Affero General Public License v3.0 ([LICENSE](LICENSE))
 
-기준 커밋은 임의로 고른 것이 아닙니다. 배포된 2.2.1 실행 파일의 PYZ 아카이브에서 모든 `src.*`
-모듈의 바이트코드를 추출해 구조 비교한 결과 **691개 모듈 전부가 이 커밋과 일치**했습니다. 같은
-날짜의 `main` HEAD(`7b4293c`)는 5개가 어긋나므로, 재현하실 때는 반드시 이 커밋을 사용하세요.
+기준 커밋은 임의로 고른 것이 아닙니다. 배포된 실행 파일의 PYZ 아카이브에서 모든 `src.*` 모듈의
+바이트코드를 추출해 후보 커밋들과 구조 비교한 결과, **692개 모듈 전부가 `7b4293c`와 일치**했습니다
+(초기 2.2.1 릴리스 `e09cf84`는 691개 중 1개가 어긋납니다). 공식 2.2.1 은 계산 오류 핫픽스로 한 번
+교체되었으므로, 재현하실 때는 반드시 이 커밋을 사용하세요.
 
-*The baseline commit was not picked by hand: every one of the 691 `src.*` modules in the released
-2.2.1 binary's PYZ matches this commit bytecode-for-bytecode. The `main` HEAD of the same day
-(`7b4293c`) differs in 5 modules, so reproduce against `e09cf84`, not HEAD.*
+*The baseline was not picked by hand: all 692 `src.*` modules in the released binary's PYZ match
+`7b4293c` bytecode-for-bytecode. The official 2.2.1 build was replaced once by a calculation-bug
+hotfix, so reproduce against this commit.*
 
 ## 이 파생물의 변경 내용 / What this derivative changes
 
@@ -33,7 +34,7 @@ AGPL-3.0 §5, §13 이행을 위한 고지입니다.
 
 ## 배포되는 실행 파일 / The published binary
 
-원본 PyInstaller 패키지의 PYZ 아카이브에서 **`src.*` 모듈만** 번역본으로 교체하고, PE 체크섬을
+공식 2.2.1(핫픽스본) PyInstaller 패키지의 PYZ 아카이브에서 **`src.*` 모듈만** 번역본으로 교체하고, PE 체크섬을
 다시 계산해 만듭니다. `src.*` 이외의 모든 아카이브 항목은 원본과 **바이트 단위로 동일**합니다.
 튜토리얼 이미지 7장은 한국어판으로 교체되며, 원본은 설치 시 `guide_zh` 폴더에 백업됩니다.
 
