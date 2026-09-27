@@ -99,7 +99,7 @@ def build_timeline_tooltip(
     assert isinstance(item, BattleInferredInput)
     if item.is_character_switch:
         return (
-            f"추정 QTE 전환 · {item.character_name}\n"
+            f"캐릭터 전환 · {item.character_name}\n"
             f"{format_time(projected_time(item.start_us))} · "
             f"시간 신뢰도{item.timing_confidence}\n"
             "아바타는 전환 결과를 나타냅니다. 현재 실제 키보드 슬롯 근거는 없습니다."

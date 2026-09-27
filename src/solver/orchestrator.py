@@ -17,7 +17,7 @@ from src.solver.dfs_puzzle import DFSPuzzleSolver
 from src.solver.blueprint_utils import dedupe_blueprints_by_piece_signature
 from src.solver.set_effects import normalize_set_effect_mode, set_piece_options_for_mode
 from src.optimizer.scoring import ScoringEngine
-from src.optimizer.allocation_kernel import AllocationKernel, AllocationKernelRequest, estimate_candidate_pool_limits
+from src.optimizer.allocation_kernel import AllocationKernelRequest, estimate_candidate_pool_limits
 from src.utils.visualizer import BoardVisualizer
 from src.utils.logger import logger
 from src.utils.name_resolver import resolve_name
@@ -29,9 +29,13 @@ class NTEPipelineOrchestrator:
     _blueprint_cache: dict[str, List[Dict]] = {}
     _blueprint_cache_limit = 256
 
-    def __init__(self, config_dir: str | Path | None = None, *, user_database_path=None):
+    def __init__(
+        self, config_dir: str | Path | None = None, *, user_database_path=None,
+        static_database_path: str | Path | None = None,
+    ):
         self.config_dir = str(Path(config_dir) if config_dir is not None else bundled_config_dir())
         self.user_database_path = user_database_path
+        self.static_database_path = static_database_path
         self.roles_db = {}
         self.sets_db = {}
         self.shapes_db = {}
@@ -59,6 +63,7 @@ class NTEPipelineOrchestrator:
             Path(config_dir) if config_dir is not None else bundled_config_dir()
         )
         instance.user_database_path = None
+        instance.static_database_path = None
         instance.roles_db = roles_db
         instance.sets_db = sets_db
         instance.shapes_db = shapes_db
@@ -73,6 +78,7 @@ class NTEPipelineOrchestrator:
         catalog = build_legacy_allocation_static_catalog(
             config_dir=self.config_dir,
             user_database_path=self.user_database_path,
+            static_database_path=self.static_database_path,
         )
         self.roles_db = catalog.roles_db
         self.sets_db = catalog.sets_db
@@ -218,8 +224,8 @@ class NTEPipelineOrchestrator:
                             priority_groups: List[List[str]] = None, crit_rate_caps: Dict[str, float] = None,
                             crit_rate_baselines: Dict[str, float] = None,
                             custom_weapons: Dict[str, str] = None,
-                            blueprint_combo_limit: int = 500,
-                            cancel_check=None):
+                            blueprint_combo_limit: int = 2000,
+                            cancel_check=None, *, allocation_executor):
         locked_uids = locked_uids or set()
         tape_main_filters = tape_main_filters or {}
         crit_priority_modes = crit_priority_modes or {}
@@ -306,7 +312,7 @@ class NTEPipelineOrchestrator:
 
         logger.info(f"\n[4단계] 스케줄 모드 시작: [{mode}]...")
         stage_t0 = time.perf_counter()
-        final_plan = AllocationKernel(scoring_engine).execute(kernel_request)
+        final_plan = allocation_executor(kernel_request, scoring_engine)
         logger.info(f"[시간] 스케줄 단계: {time.perf_counter() - stage_t0:.2f}s")
 
         stage_t0 = time.perf_counter()

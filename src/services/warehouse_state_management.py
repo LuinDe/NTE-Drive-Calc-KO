@@ -52,6 +52,11 @@ class WarehouseStateManagementResult:
     verified: bool = False
     verification_error: str | None = None
     inventory_reduction_observed: bool = False
+    dispatch_rpc_count: int = 0
+    dispatch_duration_ms: float = 0.0
+    dispatch_rpc_duration_ms: float = 0.0
+    dispatch_retry_count: int = 0
+    confirmation_duration_ms: float = 0.0
 
 
 def _compat_uid(row: Mapping[str, Any]) -> str:
@@ -86,6 +91,7 @@ class WarehouseStateManagementService:
         static_dao_factory=StaticGameDataDao,
         state_writer_factory=WarehouseStateWriter,
         config_dir: str | Path | None = None,
+        static_database_path: str | Path | None = None,
         operation_context: OperationContext | None = None,
     ) -> None:
         self.database_path = Path(database_path)
@@ -94,6 +100,7 @@ class WarehouseStateManagementService:
         self.dao_factory = dao_factory
         self.static_dao_factory = static_dao_factory
         self.config_dir = config_dir
+        self.static_database_path = Path(static_database_path) if static_database_path is not None else None
         self.operation_context = operation_context or OperationContext.create(
             "warehouse"
         )
@@ -121,7 +128,8 @@ class WarehouseStateManagementService:
         config: dict,
         selected_roles: list[str] | None,
     ) -> WarehouseStateManagementPlan:
-        with self.dao_factory(self.database_path) as user_dao, self.static_dao_factory() as static_dao:
+        static_dao = self.static_dao_factory(self.static_database_path) if self.static_database_path is not None else self.static_dao_factory()
+        with self.dao_factory(self.database_path) as user_dao, static_dao:
             snapshot_id = user_dao.current_inventory_snapshot_id()
             if snapshot_id is None:
                 raise WarehouseStateManagementError("아직 안정 가방 스냅샷이 없어 창고를 관리할 수 없습니다")
@@ -145,6 +153,7 @@ class WarehouseStateManagementService:
             selected_roles=selected_roles,
             config_dir=self.config_dir,
             user_database_path=self.database_path,
+            static_database_path=self.static_database_path,
         ).evaluate(parsed_items, inventory)
         changes: list[dict[str, Any]] = []
         for change in evaluation.state_changes:
@@ -246,6 +255,15 @@ class WarehouseStateManagementService:
                 after_snapshot_id=result.after_snapshot_id,
                 verified=result.verified,
                 verification_error=result.verification_error,
+                dispatch_rpc_count=result.dispatch_rpc_count,
+                dispatch_duration_ms=result.dispatch_duration_ms,
+                dispatch_rpc_duration_ms=result.dispatch_rpc_duration_ms,
+                dispatch_retry_count=result.dispatch_retry_count,
+                dispatch_average_rpc_ms=round(
+                    result.dispatch_rpc_duration_ms / result.dispatch_rpc_count,
+                    3,
+                ) if result.dispatch_rpc_count else 0.0,
+                confirmation_duration_ms=result.confirmation_duration_ms,
             )
             return result
 
@@ -300,30 +318,36 @@ class WarehouseStateManagementService:
                     action_snapshot_cursor = int(cursor_reader())
             applied_changes: list[dict[str, Any]] = []
             total_changes = len(plan.changes)
+            prepared_changes: list[tuple[Mapping[str, Any], str, Mapping[str, int]]] = []
+            dispatch_metrics = None
             try:
-                for index, change in enumerate(plan.changes, 1):
+                for change in plan.changes:
                     equipment = dict(change["equipment"])
                     row = current_rows.get((equipment["slot"], equipment["serial"]))
                     if row is None:
                         raise WarehouseStateManagementError("대상 장비가 더 이상 현재 안정 스냅샷에 없습니다")
-                    self._report_progress(
-                        progress_callback,
-                        f"게임에 {index}/{total_changes}번째 장비 상태를 제출하는 중…",
-                    )
-                    try:
-                        self.state_writer.apply_one(
-                            row,
-                            str(change["target_state"]),
-                            equipment,
-                        )
-                    except WarehouseStateWriteError as exc:
-                        raise WarehouseStateManagementError(str(exc)) from exc
-                    # Rule-generated changes already have the presentation UID,
-                    # while manually-created plans do not.  Return one consistent
-                    # form so the warehouse can update the affected card at once.
+                    prepared_changes.append((row, str(change["target_state"]), equipment))
                     applied_change = dict(change)
                     applied_change["uid"] = str(applied_change.get("uid") or _compat_uid(row))
                     applied_changes.append(applied_change)
+                if prepared_changes:
+                    self._report_progress(
+                        progress_callback,
+                        f"{total_changes}개 장비 상태를 연속 제출하는 중…",
+                    )
+                    def report_completed(completed: int, total: int) -> None:
+                        self._report_progress(
+                            progress_callback,
+                            f"게임에 장비 상태를 제출하는 중: {completed}/{total}",
+                        )
+
+                    try:
+                        dispatch_metrics = self.state_writer.apply_many(
+                            prepared_changes,
+                            group_completed=report_completed,
+                        )
+                    except WarehouseStateWriteError as exc:
+                        raise WarehouseStateManagementError(str(exc)) from exc
                 if plan.command_projection_allowed and applied_changes:
                     projector = getattr(
                         user_dao, "apply_inventory_command_state_projection", None,
@@ -362,7 +386,9 @@ class WarehouseStateManagementService:
                 after_snapshot_id=plan.snapshot_id,
                 verified=True,
             )
+        assert dispatch_metrics is not None
         try:
+            confirmation_started = time.monotonic()
             self._report_progress(
                 progress_callback,
                 "수정 명령을 모두 제출했으며 게임이 새 완전 가방 스냅샷을 생성하기를 기다리는 중…",
@@ -392,6 +418,7 @@ class WarehouseStateManagementService:
                     verified = self._count_state_mismatches(rows, tuple(applied_changes)) == 0
                     verification_error = None if verified else verification_error
         finally:
+            confirmation_duration_ms = round((time.monotonic() - confirmation_started) * 1000.0, 3)
             reduction_reader = getattr(
                 self.sync_service, "guard_observed_inventory_reduction", None,
             )
@@ -412,6 +439,11 @@ class WarehouseStateManagementService:
             verified=verified,
             verification_error=verification_error,
             inventory_reduction_observed=inventory_reduction_observed,
+            dispatch_rpc_count=dispatch_metrics.rpc_count,
+            dispatch_duration_ms=dispatch_metrics.wall_duration_ms,
+            dispatch_rpc_duration_ms=dispatch_metrics.rpc_duration_ms,
+            dispatch_retry_count=dispatch_metrics.retry_count,
+            confirmation_duration_ms=confirmation_duration_ms,
         )
 
     def _wait_for_confirmation(

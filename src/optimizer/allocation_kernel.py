@@ -54,7 +54,7 @@ class AllocationKernelRequest:
     allow_missing_core: bool = False
     drive_screen_limit: int = 15
     tape_screen_limit: int = 3
-    blueprint_combo_limit: int = 500
+    blueprint_combo_limit: int = 2000
     cancel_check: Callable[[], bool] | None = None
 
 

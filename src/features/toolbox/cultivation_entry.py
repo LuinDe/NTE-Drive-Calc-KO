@@ -1,5 +1,5 @@
 # 提供工具页养成计算器的入口卡片。
-"""Entry card and dialog launcher for the toolbox cultivation calculator."""
+"""Entry card for the toolbox cultivation calculator page."""
 
 from __future__ import annotations
 
@@ -10,17 +10,12 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from src.app.theme import themed_style
-from src.features.toolbox.cultivation_calculator import CultivationCalculatorDialog
-from src.services.cultivation_planner_service import CultivationPlannerService
-
-
 def build_cultivation_calculator_entry(
     parent: QWidget,
     *,
@@ -44,14 +39,14 @@ def build_cultivation_calculator_entry(
     title.setStyleSheet(themed_style("font-size:16px;font-weight:800;color:#58a6ff"))
     copy.addWidget(title)
     description = QLabel(
-        "캐릭터 레벨, 돌파, 스킬 목표에 따라 공식 육성 재료를 합산합니다. 현재 가방을 차감하거나 체력을 추정하지는 않습니다.",
+        "전체 페이지로 이동해 캐릭터, 스킬, 아크 육성 재료를 계산합니다; 현재는 가방을 차감하지 않고 스태미나도 추산하지 않습니다.",
         row,
     )
     description.setWordWrap(True)
     description.setStyleSheet(themed_style("color:#8b949e;font-size:12px"))
     copy.addWidget(description)
     layout.addLayout(copy, 1)
-    button = QPushButton("사용", row)
+    button = QPushButton("진입", row)
     button.setObjectName("toolboxCultivationCalculator")
     button.setCursor(Qt.PointingHandCursor)
     button.setMinimumSize(76, 38)
@@ -66,19 +61,4 @@ def build_cultivation_calculator_entry(
     return row
 
 
-def show_cultivation_calculator(
-    parent: QWidget,
-    *,
-    service_factory: Callable[[], CultivationPlannerService],
-) -> None:
-    """Construct the account-bound service only when the user opens the tool."""
-
-    try:
-        service = service_factory()
-    except Exception as exc:
-        QMessageBox.warning(parent, "육성 계산기", f"육성 데이터 읽기 실패: {exc}")
-        return
-    CultivationCalculatorDialog(service, parent).exec()
-
-
-__all__ = ["build_cultivation_calculator_entry", "show_cultivation_calculator"]
+__all__ = ["build_cultivation_calculator_entry"]

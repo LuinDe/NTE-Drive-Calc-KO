@@ -384,17 +384,17 @@ def _formula_entries(
             key="weave_followup",
             section="特殊伤害",
             title="헥스 추가 피해",
-            expression="Weave = ActualDirect × [1.20×(1+0.20×S/(S+180))-1] × Π Special",
+            expression="Weave = ActualDamage × [(C+L)×(1+P)×R + clamp(R-1,0,100)] × F",
             boundary="project_rule",
-            variables=(FormulaVariable(
-                "S",
-                "헥스에 기록된 원본 피해의 실제 출처 캐릭터의 사이클 강도",
-            ),),
+            variables=(
+                FormulaVariable("S", "기록된 원본 피해의 실제 출처 캐릭터의 사이클 강도, 최소 0"),
+                FormulaVariable("C / L / P", "C는 20%; 약점 감응 활성화 시 L, P 각 10%, 아니면 각 0%; (20% + 10%) × (1 + 10%) = 33%"),
+                FormulaVariable("R / F", "R = 1+0.20×S/(S+180); 최종 승수 F는 현재 1을 사용"),
+            ),
             applicable_when=("정식 헥스 추가 피해는 기록된 원본 피해의 속성을 계승함",),
-            limitations=("예상 직접 피해로 액션 축을 재생성하지 않고, 고정 축의 발동 히트만 소비합니다.",),
+            limitations=("현재 33%의 분해 해석이며, 독립적으로 확인된 게임 결산 순서는 아닙니다; P는 복제 부분에만 곱해지고, 다른 추격 피해 증가는 직접 대입되지 않습니다.",),
             evidence=(
                 _ref("project_contract", contract, "사이클 기본 규칙", "헥스 강도 곱연산 구간"),
-                _ref("implementation", calculation, "calculate_weave_followup_damage", "실제 직접 피해에 대한 추가 공식"),
             ),
         ),
         FormulaEntry(
@@ -774,7 +774,7 @@ def _support_entries(
 class StaticCatalogFormulaService:
     """Load a release-static/code audit projection without touching account data."""
 
-    PROJECTION_VERSION = "static-catalog-formula-v1"
+    PROJECTION_VERSION = "static-catalog-formula-v3"
 
     def __init__(self, database_path: str | Path | None = None) -> None:
         self._database_path = database_path

@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 import os
+import json
+import subprocess
 from pathlib import Path
 import secrets
 import threading
@@ -104,9 +107,65 @@ def packaged_mod_loader(application_root: str | Path) -> Path:
     )
 
 
-def game_launcher_executable(game_executable_path: str | Path) -> Path:
-    """Resolve a trusted launcher from the user-selected HTGame installation."""
+def _unique_capability_pairs(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError('duplicate capability key')
+        value[key] = item
+    return value
 
+
+def probe_mod_loader_capabilities(loader_path: str | Path) -> frozenset[str]:
+    """Query the explicit dry-run protocol; the Loader checks its own embedded shim."""
+    loader = Path(loader_path).resolve()
+    try:
+        completed = subprocess.run(
+            [str(loader), '--capabilities-json', '--dry-run', '--once'],
+            capture_output=True, text=True, encoding='utf-8-sig', errors='strict',
+            timeout=5, check=False, cwd=str(loader.parent),
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+        )
+    except OSError as error:
+        if getattr(error, 'winerror', None) == 740:
+            raise ModLoaderRuntimeError('현재 실행 환경이 권한 상승되지 않아 Loader 능력을 읽을 수 없습니다; 앱의 정상적인 권한 상승 방식으로 시작하세요.') from error
+        raise ModLoaderRuntimeError('Loader의 읽기 전용 기능 검사를 실행할 수 없습니다.') from error
+    except (subprocess.TimeoutExpired, UnicodeError) as error:
+        raise ModLoaderRuntimeError('Loader 기능 검사가 정상적으로 완료되지 않아 로드를 시작하지 않았습니다.') from error
+    try:
+        if completed.returncode != 0 or len(completed.stdout) > 16384:
+            raise ValueError('query failed')
+        value = json.loads(completed.stdout, object_pairs_hook=_unique_capability_pairs)
+        if not isinstance(value, dict):
+            raise ValueError('capability object required')
+        modes = value.get('payload_load_modes')
+        kinds = value.get('payload_kinds')
+        if (type(value.get('schema_version')) is not int or value['schema_version'] != 1
+                or value.get('component') != 'nte-mod-loader'
+                or value.get('embedded_shim_compatible') is not True
+                or value.get('managed_session') is not True
+                or type(value.get('shim_protocol_version')) is not int or value['shim_protocol_version'] != 3
+                or not isinstance(modes, list) or not modes
+                or any(not isinstance(mode, str) for mode in modes) or len(modes) != len(set(modes))
+                or not isinstance(kinds, list) or any(not isinstance(kind, str) for kind in kinds)
+                or len(kinds) != len(set(kinds)) or 'nte_capture_runtime_v1' not in kinds):
+            raise ValueError('capability protocol mismatch')
+    except (ValueError, TypeError, AttributeError, RecursionError) as error:
+        raise ModLoaderRuntimeError('현재 Loader와 내장 shim이 호환되는 표준 로드 기능을 선언하지 않았습니다. 호환 Loader로 교체해 주세요.') from error
+    return frozenset(modes)
+
+
+def mod_loader_arguments(*, payload_path: Path, event_name: str, owner_pid: int,
+                         payload_load_mode: str = "loadlibrary") -> str:
+    if payload_load_mode != 'loadlibrary':
+        raise ModLoaderRuntimeError('지원하지 않는 Loader payload 로드 방식입니다.')
+    mode = ' --payload-load-mode loadlibrary'
+    return (f'--dll "{payload_path}"{mode} --monitor-timeout 0 '
+            f'--stop-event "{event_name}" --owner-pid {owner_pid}')
+
+
+def game_launcher_candidates(game_executable_path: str | Path) -> tuple[Path, ...]:
+    """List only launcher images in the selected HTGame installation."""
     game = Path(game_executable_path).expanduser().resolve()
     if not game.is_file() or game.name.casefold() != "htgame.exe":
         raise ModLoaderRuntimeError("유효한 HTGame.exe를 선택하지 않아 공식 런처를 찾을 수 없습니다")
@@ -126,12 +185,17 @@ def game_launcher_executable(game_executable_path: str | Path) -> Path:
         install_root / "NTELauncher" / name
         for name in _LAUNCHER_NAMES
     )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.resolve()
+    found = tuple(candidate.resolve() for candidate in candidates if candidate.is_file())
+    if found:
+        return found
     raise ModLoaderRuntimeError(
         "선택한 HTGame.exe의 설치 루트에서 공식 런처를 찾을 수 없습니다. 게임 설치를 복구하거나 게임을 다시 선택하세요"
     )
+
+
+def game_launcher_executable(game_executable_path: str | Path) -> Path:
+    """Resolve the primary trusted launcher used by the Loader."""
+    return game_launcher_candidates(game_executable_path)[0]
 
 
 class ModLoaderRuntime:
@@ -145,6 +209,13 @@ class ModLoaderRuntime:
         self._process_id: int | None = None
         self._loader_path: Path | None = None
         self._payload_path: Path | None = None
+
+    def require_payload_load_mode(self, mode: str) -> None:
+        if mode != 'loadlibrary':
+            raise ModLoaderRuntimeError('이 검사는 네이티브 수집 DLL의 표준 로드에만 사용됩니다.')
+        loader = packaged_mod_loader(self._application_root)
+        if mode not in probe_mod_loader_capabilities(loader):
+            raise ModLoaderRuntimeError('현재 Loader는 표준 수집 로드를 지원하지 않습니다. 호환 Loader로 교체해 주세요.')
 
     def snapshot(self, *, payload_path: str | Path) -> ModLoaderRuntimeSnapshot:
         payload = Path(payload_path).resolve()
@@ -162,7 +233,7 @@ class ModLoaderRuntime:
                 "missing_payload",
                 loader,
                 payload,
-                detail="패키지된 dwmapi.dll이 없습니다",
+                detail="Loader의 payload 파일이 아직 준비되지 않았습니다.",
             )
         if os.name != "nt":
             return ModLoaderRuntimeSnapshot(
@@ -185,9 +256,14 @@ class ModLoaderRuntime:
         *,
         payload_path: str | Path,
         launcher_path: str | Path,
+        payload_load_mode: str = "loadlibrary",
+        launch_guard: Callable[[], None] | None = None,
     ) -> ModLoaderRuntimeSnapshot:
         if os.name != "nt":
             raise ModLoaderRuntimeError("Mod Loader는 Windows만 지원합니다")
+        if payload_load_mode != 'loadlibrary':
+            raise ModLoaderRuntimeError('지원하지 않는 Loader payload 로드 방식입니다.')
+        self.require_payload_load_mode(payload_load_mode)
         loader = packaged_mod_loader(self._application_root)
         payload = Path(payload_path).resolve()
         if not payload.is_file():
@@ -201,6 +277,8 @@ class ModLoaderRuntime:
             raise ModLoaderRuntimeError("Mod Loader에 넘길 공식 런처를 찾을 수 없습니다")
 
         with self._lock:
+            if launch_guard is not None:
+                launch_guard()
             if self._refresh_running_locked():
                 return ModLoaderRuntimeSnapshot(
                     "running",
@@ -225,10 +303,8 @@ class ModLoaderRuntime:
                     f"Loader 중지 이벤트를 만들 수 없습니다. Windows 오류 {ctypes.get_last_error()}"
                 )
 
-            parameters = (
-                f'--dll "{payload}" --monitor-timeout 0 '
-                f'--stop-event "{event_name}" --owner-pid {os.getpid()}'
-            )
+            parameters = mod_loader_arguments(payload_path=payload, event_name=event_name,
+                                               owner_pid=os.getpid(), payload_load_mode=payload_load_mode)
             execution = _ShellExecuteInfoW()
             execution.cbSize = ctypes.sizeof(_ShellExecuteInfoW)
             execution.fMask = _SEE_MASK_NOCLOSEPROCESS
@@ -244,9 +320,17 @@ class ModLoaderRuntime:
             os.environ[MOD_LOADER_LAUNCHER_ENV] = str(launcher)
             launch_error = 0
             try:
+                if launch_guard is not None:
+                    launch_guard()
                 launched = bool(shell_execute(ctypes.byref(execution)))
                 if not launched or not execution.hProcess:
                     launch_error = ctypes.get_last_error()
+            except Exception:
+                close_handle = kernel32.CloseHandle
+                close_handle.argtypes = (wintypes.HANDLE,)
+                close_handle.restype = wintypes.BOOL
+                close_handle(event_handle)
+                raise
             finally:
                 if previous_launcher is None:
                     os.environ.pop(MOD_LOADER_LAUNCHER_ENV, None)

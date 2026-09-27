@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from src.features.input_operation_entry import request_input_entry, show_input_unavailable
 from typing import Any
 
 from PySide6.QtCore import QModelIndex, Qt
@@ -218,6 +219,11 @@ def _page_warehouse(self):
         themed_style("#warehouseView{background:#0d1117;border:1px solid #21262d;border-radius:10px;padding:8px}")
     )
     layout.addWidget(self.warehouse_view, 1)
+    self.warehouse_source_notice = QLabel()
+    self.warehouse_source_notice.setWordWrap(True)
+    self.warehouse_source_notice.setStyleSheet(themed_style("color:#d29922;padding:4px 8px"))
+    self.warehouse_source_notice.hide()
+    layout.addWidget(self.warehouse_source_notice)
     self.warehouse_hint = QLabel("창고는 이 페이지를 열 때 최신 안정 가방 스냅샷을 읽습니다.")
     self.warehouse_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
     self.warehouse_hint.setStyleSheet(themed_style("color:#8b949e;padding:8px"))
@@ -296,8 +302,12 @@ def _on_warehouse_loaded(self, token, result):
     )
     self._apply_warehouse_filters()
     if is_visual_inventory_source(self._warehouse_source):
-        self.warehouse_hint.setText("현재는 전체 스캔 인벤토리입니다: 레벨, 잠금/폐기 상태, 장착 캐릭터를 인식할 수 없으며 감정과 비교는 계속 사용할 수 있습니다.")
-        self.warehouse_hint.show()
+        self.warehouse_source_notice.setText(
+            "비주얼 스캔 인벤토리: 레벨, 잠금/폐기, 장착 캐릭터를 읽을 수 없습니다; 감정과 비교는 계속 사용할 수 있습니다."
+        )
+        self.warehouse_source_notice.show()
+    else:
+        self.warehouse_source_notice.hide()
 
 
 def _on_warehouse_load_error(self, token, error):
@@ -306,6 +316,7 @@ def _on_warehouse_load_error(self, token, error):
     self._warehouse_all_items = []
     self.warehouse_model.set_items([])
     self.warehouse_summary.setText("읽기 실패")
+    self.warehouse_source_notice.hide()
     self.warehouse_hint.setText(f"창고 읽기 실패: {error}")
     self.warehouse_hint.show()
     logger.error(f"창고 안정 스냅샷 읽기 실패: {error}")
@@ -331,7 +342,9 @@ def _apply_warehouse_filters(self):
     if filtered:
         self.warehouse_hint.hide()
     else:
-        self.warehouse_hint.setText("현재 필터 조건에 맞는 장비가 없습니다. 먼저 가방 동기화를 완료하거나 필터 조건을 조정하세요.")
+        self.warehouse_hint.setText(
+            "가방이 비어 있습니다. 먼저 동기화를 완료하세요." if total == 0 else "현재 필터 조건에 맞는 장비가 없습니다."
+        )
         self.warehouse_hint.show()
 
 
@@ -408,6 +421,8 @@ def _set_warehouse_selected_state(
     target_state: str,
 ) -> None:
     """Stage the requested state for all selected virtual cards locally."""
+    if not request_input_entry(self, "native_equipment", "창고 잠금 및 폐기"):
+        return
     if target_state not in {"normal", "locked", "discarded"}:
         return
     indexes = self.warehouse_view.selectionModel().selectedIndexes()
@@ -455,6 +470,8 @@ def _toggle_warehouse_item_state(
     target_state: str,
 ) -> None:
     """Stage a single card's lock/discard icon action without changing game state yet."""
+    if not request_input_entry(self, "native_equipment", "창고 잠금 및 폐기"):
+        return
     item = (
         index.data(Qt.ItemDataRole.UserRole)
         if index is not None
@@ -485,6 +502,8 @@ def _toggle_warehouse_item_state(
 
 
 def _save_warehouse_state_changes(self):
+    if not request_input_entry(self, "native_equipment", "창고 상태 저장"):
+        return
     """Validate manual card edits against the fixed snapshot, then write via nte-core."""
     pending = dict(getattr(self, "_warehouse_pending_state_changes", {}))
     snapshot_id = getattr(self, "_warehouse_snapshot_id", None)
@@ -503,7 +522,7 @@ def _save_warehouse_state_changes(self):
         return
     sync_service = getattr(self, "_inventory_sync_service", None)
     if sync_service is None or not sync_service.is_running:
-        QMessageBox.warning(self, "창고 상태를 저장할 수 없음", "먼저 작업 공간에서 가방 동기화를 시작하고 상태가 안정 감시로 표시될 때까지 기다리세요.")
+        show_input_unavailable(self, "창고 상태 저장", "게임 장비 연결이 아직 준비되지 않았습니다. 검사 상세 정보를 확인하세요; 컴포넌트를 배포해야 하면 먼저 게임을 완전히 종료하고, 배포가 완료된 후 다시 시작해 게임 장면에 진입하세요.")
         return
     service = WarehouseStateManagementService(
         self.app_context.account.user_database_path,
@@ -534,9 +553,9 @@ def _on_warehouse_manual_plan_ready(self, plan):
         self._update_warehouse_save_state()
         QMessageBox.information(self, "창고 저장", "모든 수동 상태가 현재 게임 가방과 일치합니다.")
         return
-    counts = {"弃置": 0, "锁定": 0, "正常": 0}
+    counts = {"폐기": 0, "잠금": 0, "정상": 0}
     for change in plan.changes:
-        counts[{"discarded": "弃置", "locked": "锁定", "normal": "正常"}[change["target_state"]]] += 1
+        counts[{"discarded": "폐기", "locked": "잠금", "normal": "정상"}[change["target_state"]]] += 1
     message = (
         f"장비 {len(plan.changes)}개의 수동 상태를 저장합니다: 폐기 {counts['弃置']}개,"
         f"잠금 {counts['锁定']}개, 정상 복원 {counts['正常']}개.\n\n"
@@ -570,6 +589,8 @@ def _on_warehouse_manual_plan_ready(self, plan):
 
 def _open_warehouse_state_manager(self):
     """Open the existing rule editor, then apply its result through nte-core."""
+    if not request_input_entry(self, "native_equipment", "창고 상태 관리"):
+        return
     active_worker = getattr(self, "_warehouse_state_worker", None)
     if active_worker is not None and active_worker.isRunning():
         return
@@ -584,7 +605,10 @@ def _open_warehouse_state_manager(self):
         account.user_config_dir,
         self.app_context.paths.config_dir,
         user_database_path=account.user_database_path,
+        static_database_path=self.app_context.paths.equipment_allocation_database_path,
+        asset_root=self.app_context.paths.equipment_allocation_asset_root,
         window_title="창고 폐기/잠금 관리",
+        show_server_region_option=False,
     ):
         return
     config = load_scan_post_action_config(
@@ -597,12 +621,13 @@ def _open_warehouse_state_manager(self):
         return
     sync_service = getattr(self, "_inventory_sync_service", None)
     if sync_service is None or not sync_service.is_running:
-        QMessageBox.warning(self, "창고를 관리할 수 없음", "먼저 작업 공간에서 가방 동기화를 시작하고 상태가 안정 감시로 표시될 때까지 기다리세요.")
+        show_input_unavailable(self, "창고 상태 관리", "게임 장비 연결이 아직 준비되지 않았습니다. 검사 상세 정보를 확인하세요; 컴포넌트를 배포해야 하면 먼저 게임을 완전히 종료하고, 배포가 완료된 후 다시 시작해 게임 장면에 진입하세요.")
         return
     service = WarehouseStateManagementService(
         account.user_database_path,
         sync_service,
         config_dir=self.app_context.paths.config_dir,
+        static_database_path=self.app_context.paths.equipment_allocation_database_path,
         operation_context=OperationContext.create(
             "warehouse",
             account_id=account.active_account_id,
@@ -624,13 +649,13 @@ def _on_warehouse_state_plan_ready(self, plan):
     if not plan.changes:
         QMessageBox.information(self, "창고 관리", "현재 안정 가방에 규칙에 맞고 상태를 바꿔야 할 장비가 없습니다.")
         return
-    counts = {"弃置": 0, "锁定": 0, "取消弃置/锁定": 0}
+    counts = {"폐기": 0, "잠금": 0, "取消弃置/锁定": 0}
     for change in plan.changes:
         target = change.get("target_state")
         if target == "discarded":
-            counts["弃置"] += 1
+            counts["폐기"] += 1
         elif target == "locked":
-            counts["锁定"] += 1
+            counts["잠금"] += 1
         else:
             counts["取消弃置/锁定"] += 1
     message = (
@@ -700,7 +725,7 @@ def _on_warehouse_state_applied(self, result):
     )
     if getattr(result, "inventory_reduction_observed", False):
         result_message += (
-            "\n\n인벤토리 감소가 감지되었습니다. 게임에서 인벤토리를 분해하지 않았다면 게임 로그인 화면에서 가방 동기화를 다시 하세요."
+            "\n\n인벤토리 감소가 감지되었습니다; 게임에서 인벤토리를 분해하지 않았다면 작업 공간에서 “동기화 재시작”을 클릭하고 전체 가방 읽기가 끝날 때까지 기다리세요."
         )
     if getattr(result, "verified", False) and not getattr(result, "inventory_reduction_observed", False):
         result_message += (

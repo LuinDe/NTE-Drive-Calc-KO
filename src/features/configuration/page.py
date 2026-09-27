@@ -421,10 +421,7 @@ def _populate_config_role_tab(window, data, role_name, tab_scroll, rebuild_all_t
     form_layout.setSpacing(12)
     form_layout.setContentsMargins(12, 12, 12, 12)
 
-    source_text = (
-        f"캐릭터: {role_name}　현재 계정 SQLite 가중치 설정"
-        f"(초기 출처: {role_data.get('source_kind') or 'default'})"
-    )
+    source_text = f"캐릭터: {role_name}  현재 계정 가중치 설정"
     if not role_data.get("is_custom"):
         source_text += "\n추가 형태: 배포 정적 리소스 라이브러리 · 읽기 전용"
     source = QLabel(source_text)
@@ -688,7 +685,7 @@ def save_config_form(window, config_dir, json_edit_dialog_cls):
     QMessageBox.information(
         window,
         "저장",
-        "카트리지 메인 스탯과 드라이브 서브 스탯 가중치를 현재 계정 SQLite에 저장했습니다. 사용자 정의 캐릭터의 추가 형태는 저장했고, 공식 캐릭터의 추가 형태는 정적 리소스 라이브러리 값을 유지합니다.",
+        "캐릭터 가중치 설정이 저장되었습니다.",
     )
 
 

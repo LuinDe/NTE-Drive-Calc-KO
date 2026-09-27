@@ -5,10 +5,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QHBoxLayout,
     QFrame,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -39,8 +41,8 @@ from .role_calculation import (
     _selected_growth,
 )
 from .role_equipment import _build_drive_summary_group
+from .role_awakening import _build_awakening_group
 from .role_growth import (
-    _build_awakening_group,
     _build_base_group,
     _build_fork_group,
     _build_skill_group,
@@ -89,8 +91,8 @@ def _build_world_bonus_card(window) -> QFrame:
     card.setObjectName("officialRoleWorldBonusCard")
     card.setFixedHeight(35)
     layout = QHBoxLayout(card)
-    layout.setContentsMargins(10, 0, 10, 0)
-    layout.setSpacing(6)
+    layout.setContentsMargins(8, 0, 8, 0)
+    layout.setSpacing(3)
     title = QLabel("가구 보너스")
     title.setObjectName("officialRoleWorldBonusTitle")
     layout.addWidget(title)
@@ -99,25 +101,29 @@ def _build_world_bonus_card(window) -> QFrame:
     attack.setObjectName("officialRoleWorldAttack")
     attack.setRange(0, 20)
     attack.setSingleStep(2)
-    attack.setSuffix(" 공격")
+    attack.setButtonSymbols(QAbstractSpinBox.NoButtons)
     attack.setToolTip("요도 가구 보너스: 레벨당 공격력 +2, 최대 레벨 +20")
-    attack.setFixedWidth(72)
+    attack.setFixedWidth(50)
     attack.setFixedHeight(29)
-    attack.setStyleSheet("padding:1px 6px")
+    attack.setStyleSheet("padding:1px 4px")
     crit_damage = NoWheelDoubleSpinBox()
     crit_damage.setObjectName("officialRoleWorldCritDamage")
     crit_damage.setRange(0.0, 4.0)
     crit_damage.setDecimals(1)
     crit_damage.setSingleStep(0.4)
-    crit_damage.setSuffix("% 치명 피해")
+    crit_damage.setButtonSymbols(QAbstractSpinBox.NoButtons)
     crit_damage.setToolTip("글러브 가구 보너스: 레벨당 치명 피해 +0.4%, 최대 레벨 +4%")
-    crit_damage.setFixedWidth(96)
+    crit_damage.setFixedWidth(50)
     crit_damage.setFixedHeight(29)
-    crit_damage.setStyleSheet("padding:1px 6px")
-    layout.addWidget(QLabel("妖刀"))
+    crit_damage.setStyleSheet("padding:1px 4px")
     layout.addWidget(attack)
-    layout.addWidget(QLabel("글러브"))
+    attack_unit = QLabel("공")
+    attack_unit.setObjectName("officialRoleWorldAttackUnit")
+    layout.addWidget(attack_unit)
     layout.addWidget(crit_damage)
+    crit_damage_unit = QLabel("%치명 피해")
+    crit_damage_unit.setObjectName("officialRoleWorldCritDamageUnit")
+    layout.addWidget(crit_damage_unit)
     window.official_role_world_attack = attack
     window.official_role_world_crit_damage = crit_damage
     _set_world_bonus_controls(window, settings)
@@ -164,11 +170,14 @@ def _populate_role_tab(window, scroll: QScrollArea, character_id: int) -> None:
         form.addWidget(_build_base_group(window, character_id, detail, editor))
         form.addWidget(_build_awakening_group(window, character_id, detail, editor))
         form.addWidget(_build_skill_group(window, character_id, detail, editor))
-        form.addWidget(_build_margin_group(window, character_id, detail, editor))
+        limited_catalog = detail.get("catalog_scope") in {"role_page", "reference"}
+        if not limited_catalog:
+            form.addWidget(_build_margin_group(window, character_id, detail, editor))
         form.addWidget(_build_fork_group(window, character_id, detail, editor))
-        form.addWidget(_build_drive_summary_group(window, detail, editor))
-        form.addWidget(_build_damage_formula_group(detail, editor))
-        form.addWidget(_build_weight_group(window, character_id, detail, editor))
+        if not limited_catalog:
+            form.addWidget(_build_drive_summary_group(window, detail, editor))
+            form.addWidget(_build_damage_formula_group(detail, editor))
+            form.addWidget(_build_weight_group(window, character_id, detail, editor))
         form.addSpacing(100)
         form.addStretch()
         scroll.setWidget(content)
@@ -209,7 +218,7 @@ def _save_profiles(window, *, show_message: bool = True) -> bool:
                     character_id=character_id,
                     character_level=int(growth[0]),
                     breakthrough_stage=int(growth[1]),
-                    awakening_level=len(selected_awaken_effect_ids),
+                    awakening_level=editor["awakening_level"].value(),
                     selected_awaken_effect_ids=selected_awaken_effect_ids,
                     likeability_level_10_enabled=editor[
                         "likeability_level_10"
@@ -375,8 +384,27 @@ def _page_my_role(window) -> QWidget:
     header.addWidget(base_weights)
     header.addWidget(reset_current)
     header.addWidget(reset_all)
+    sync = QPushButton("동기화 상태")
+    sync.setObjectName("officialRoleSyncPrimary")
+    sync.setStyleSheet(themed_style(
+        "QPushButton#officialRoleSyncPrimary{background:#1f6feb;color:#fff;"
+        "border:1px solid #58a6ff;font-weight:600}"
+        "QPushButton#officialRoleSyncPrimary:hover{background:#388bfd}"
+        "QPushButton#officialRoleSyncPrimary:disabled{background:#1f3f6e;"
+        "color:#8b949e;border-color:#315f9e}"
+    ))
+    header_button_height = save.sizeHint().height()
+    save.setFixedHeight(header_button_height)
+    sync.setFixedHeight(header_button_height)
+    header.addWidget(sync)
     header.addWidget(save)
     root.addLayout(header)
+    sync_result = QPlainTextEdit()
+    sync_result.setReadOnly(True)
+    sync_result.setAccessibleName('캐릭터 동기화 결과')
+    sync_result.setMaximumHeight(110)
+    sync_result.hide()
+    root.addWidget(sync_result)
 
     area = QScrollArea()
     area.setWidgetResizable(True)
@@ -388,6 +416,15 @@ def _page_my_role(window) -> QWidget:
     window.my_role_form_widget = content
     window.my_role_form_layout = content_layout
     window._official_role_page = page
+    sync_controller = getattr(window, "character_profile_sync_controller", None)
+    if sync_controller is not None:
+        sync_controller.attach_controls(sync, (area, reset_current, reset_all, save,
+                                               window.official_role_world_attack,
+                                               window.official_role_world_crit_damage), result_text=sync_result)
+    else:
+        from src.features.input_operation_entry import show_input_unavailable
+        sync.clicked.connect(lambda: show_input_unavailable(
+            window, "캐릭터 상태 동기화", "캐릭터 상태 동기화 서비스가 아직 준비되지 않았습니다. 컴포넌트 연결을 확인하세요."))
     window.official_role_search = search
     window._official_role_dirty_ids = set()
     window._official_role_world_bonus_dirty = False

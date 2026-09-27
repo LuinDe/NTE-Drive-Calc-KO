@@ -110,9 +110,12 @@ def format_analysis_evidence(analysis: BattleAnalysisSnapshot) -> str:
 
 def format_time_stop_evidence(analysis: BattleAnalysisSnapshot) -> str:
     return {
-        "nte_core": f"nte-core 기록 시간 정지 {len(analysis.time_stop_intervals)}개 구간",
+        "nte_core": f"시간 정지 {len(analysis.time_stop_intervals)}개 구간 수집됨",
+        "nte_core_partial": (
+            f"실측 시간 정지 {len(analysis.time_stop_intervals)}개 구간(커버리지가 불완전하며 누락 구간은 알 수 없음)"
+        ),
         "nte_core_plus_inferred_linko_e": (
-            f"nte-core 시간 정지 + 링코 E 추정 {len(analysis.time_stop_intervals)}개 구간"
+            f"수집된 시간 정지 + 링코 E 추산 {len(analysis.time_stop_intervals)}개 구간"
             "(낮은 신뢰도 포함)"
         ),
         "inferred_q_action": (

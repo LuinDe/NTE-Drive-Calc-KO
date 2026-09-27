@@ -125,6 +125,11 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
         root = QVBoxLayout(content)
         root.setContentsMargins(22, 14, 22, 22)
         root.setSpacing(14)
+        model_notice = QLabel("시뮬레이션 이득은 일부 게임 메커니즘을 놓칠 수 있습니다; 실측 전투 리포트 데이터는 영향을 받지 않습니다.")
+        model_notice.setObjectName("battleMarginalModelNotice")
+        model_notice.setWordWrap(True)
+        model_notice.setStyleSheet(themed_style("color:#d29922;font-size:12px"))
+        root.addWidget(model_notice)
 
         metrics = QGridLayout()
         definitions = (
@@ -227,12 +232,7 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
         self.character_panel = BattleMarginalCharacterPanel()
         root.addWidget(self.character_panel)
         attribute_card, attribute_layout = analysis_section("드라이브 서브 스탯 단위 한계 이득")
-        attribute_note = QLabel(
-            "실제로 나올 수 있는 금색 드라이브 서브 스탯만 표시하며, 각 행의 기본 단위는 1칸입니다. 패널 속성은 현재 적용 기준선이고,"
-            "피해 가중 현재 패널 속성은 공식 패널 연동 피해가 발생한 시점의 동적 속성으로 가중합니다."
-            "링코 패널이 제어하는 팀원의 동조 피해도 여기에 포함되므로 패널 연동 피해가 상단의 원본 캐릭터 피해보다 클 수 있습니다."
-            "Core 원본 피해 귀속은 변경하지 않습니다."
-        )
+        attribute_note = QLabel('각 행은 금색 드라이브 서브 스탯 1칸 기준으로 계산합니다; "—"는 정량화 가능한 증거가 없음을 의미합니다.')
         attribute_note.setStyleSheet(
             themed_style("color:#8b949e;font-size:12px")
         )
@@ -242,7 +242,7 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
             (
                 "속성 단위",
                 "패널 속성",
-                "피해 가중 현재 패널 속성",
+                "피해 가중 공식 속성",
                 "패널 연동 이득",
                 "팀 전체 기대 이득",
                 "연동 패널 피해",
@@ -263,12 +263,7 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
             self.fork_benefit_notice,
         ) = build_marginal_benefit_sections(root)
         buff_card, buff_layout = analysis_section("팀 Buff 한계 이득")
-        buff_note = QLabel(
-            "Buff를 하나씩 개별 제거하고, 실제로 피해를 입힌 캐릭터별로 이득을 나눕니다."
-            "캐릭터 이득을 합하면 해당 Buff의 팀 전체 이득이 되지만, 서로 다른 Buff끼리는 직접 합산할 수 없습니다."
-            "정식 히트 인과 근거가 있는 메커니즘 패시브도 여기서 출처 캐릭터별로 병합해 표시합니다."
-            "피해 커버리지는 고정축 유효 피해를 집계하며, 커버된 히트와 연동된 HP 상한 정산을 포함합니다."
-        )
+        buff_note = QLabel("같은 Buff의 캐릭터 이득은 합산할 수 있습니다; 서로 다른 Buff는 직접 더하지 마세요.")
         buff_note.setStyleSheet(themed_style("color:#8b949e;font-size:12px"))
         buff_note.setWordWrap(True)
         buff_layout.addWidget(buff_note)
@@ -415,6 +410,10 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
         hit_details=None,
     ) -> None:
         self._analysis = analysis
+        partial_clock = getattr(analysis, "time_stop_source_kind", "") == "nte_core_partial"
+        self.timeline_time_mode_combo.setEnabled(not partial_clock)
+        if partial_clock:
+            self.timeline_time_mode_combo.setCurrentIndex(self.timeline_time_mode_combo.findData(ELAPSED_TIME_MODE))
         self._hit_details = hit_details
         comparison = analysis.build_counterfactual
         self.derived_settlements.render(comparison)
@@ -537,7 +536,7 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
                                          else details.for_hit(original_hit, formula=True))
         dialog = getattr(self, "_counterfactual_hit_dialog", None)
         if dialog is None:
-            dialog = BattleHitFormulaDialog(self)
+            dialog = BattleHitFormulaDialog(self, game_ui_asset_root=self._game_ui_asset_root)
             dialog.setWindowTitle("한계 이득 히트별 상세")
             self._counterfactual_hit_dialog = dialog
         dialog.show_for_hit(
@@ -548,6 +547,8 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
             related_counterfactuals=related_counterfactuals,
             related_analysis=candidate,
             projection=buff_projection, related_hit_details=details,
+            participant_names={b.character_id: b.character_name for b in analysis.baselines},
+            target_resolutions=analysis.target_instance_resolutions,
         )
 
     def profiles(self) -> list[dict]:
@@ -629,7 +630,7 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
             self.change_summary.setText("현재 후보가 아직 완전하지 않음")
             self.change_summary.setToolTip("캐릭터 육성과 고정 가능한 장비 세팅 선택을 완료하세요.")
             return
-        awakening_count = len(profile.get("selected_awaken_effect_ids") or ())
+        awakening_count = int(profile.get("awakening_level") or 0)
         skill_levels = tuple(
             int(value) for value in (profile.get("skill_levels") or {}).values()
         )
@@ -759,9 +760,7 @@ class BattleMarginalPage(BattleMarginalBuffRenderMixin, QWidget):
             self.metric_labels["role"].setText(
                 "—" if original is None else _number(original.damage)
             )
-            self.metric_subtitles["role"].setText(
-                "+0.00% · 현재 적용 기준선 (이번에 수정 없음)"
-            )
+            self.metric_subtitles["role"].setText("+0.00% · 현재 적용 기준선 (이번에 수정 없음)")
         else:
             projected_damage = display_projection(
                 candidate=role.candidate_damage,

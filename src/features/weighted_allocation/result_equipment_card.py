@@ -22,7 +22,7 @@ def assignment_weight_tooltip(
     if candidate is None:
         return ""
     labels = getattr(owner, "_weighted_property_names", {})
-    lines = ["계정 SQLite 스탯 가중치"]
+    lines = ["현재 계정 스탯 가중치"]
     if assignment.kind == "core":
         for stat in candidate.main_stats:
             property_id = str(stat.property_id)
@@ -83,4 +83,3 @@ def result_equipment_card(
     if tooltip:
         card.setToolTip("\n".join(filter(None, (card.toolTip(), tooltip))))
     return card
-

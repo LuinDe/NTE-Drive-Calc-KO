@@ -1,5 +1,5 @@
-# 把单次逐击的推算 Buff 投影整理为可审计的中文详情。
-"""Qt-free explanation for inferred Buffs active on one battle hit."""
+# 把单次逐击的 Buff 证据与属性投影整理为可审计的中文详情。
+"""Qt-free explanation of the core's per-hit Buff decisions."""
 
 from __future__ import annotations
 
@@ -159,7 +159,7 @@ class BattleHitBuffExplanationService:
         if projection is None and allow_projection_fallback:
             projection = BattleBuffAttributeProjectionService.project_hit(hit, intervals)
         if projection is None:
-            return "이 히트의 원본 Buff 상세가 생성되지 않았습니다; 해당 구간의 히트별 분석을 먼저 불러오세요."
+            return "이번 히트의 Buff 분석 상세가 생성되지 않았습니다; 먼저 해당 시간대의 히트별 분석을 로드하세요."
         active_by_id = {row.interval_id: row for row in intervals}
         decisions = tuple(
             decision
@@ -179,11 +179,12 @@ class BattleHitBuffExplanationService:
             f"{hit.character_name} · {damage_name}",
             f"히트 시각: {_time(hit.relative_time_us)}    대상: {hit.target_name}",
             (
-                f"히트 시점 추정 Buff: {len(decisions)}개    "
+                f"히트 시 Buff 분석: {len(decisions)}개    "
                 f"투영됨 {counts['applied']} / 미채택 {counts['not_applied']} / "
                 f"확인 대기 {counts['unresolved']}"
             ),
-            "기준: 이는 고정된 장비 세팅·동작·히트별 추정이며, nte-core 런타임 실측 Buff가 아닙니다.",
+            "기준: 분석 코어가 반환한 히트별 판정을 사용합니다; 런타임 관측, 정적 규칙, 추론은 각각의 근거에 따라 구분해야 합니다.",
+            "상태 증거와 수치 증거는 따로 표기됩니다; 효과의 존재가 관측되었다고 해서 이 히트에 대한 수치 이득이 증명된 것은 아닙니다.",
             "공식 소비 기준: 투영됨은 히트별 속성값에 들어갔다는 뜻일 뿐이며, 현재 피해 공식에 소비되는지 여부는"
             "피해 공식에 나열된 곱연산 구간과 출처 항을 기준으로 합니다.",
             "",
@@ -214,19 +215,22 @@ class BattleHitBuffExplanationService:
             for decision in matching:
                 interval = active_by_id[decision.interval_id]
                 lines.append(
-                    f"- {interval.buff_name} ×{interval.stacks}"
+                    f"- {interval.buff_name} (공식은 구간 중첩 수 ×{interval.stacks} 적용)"
                     f"(출처 캐릭터: {interval.source_character_name};"
                     f"적용 대상: {_SCOPE_LABELS.get(interval.target_scope, interval.target_scope)};"
                     f"구간: {_time(interval.start_us)}—{_time(interval.end_us)};"
-                    f"상태 {interval.state_confidence} / 수치 {interval.value_confidence})"
+                    f"상태 {decision.state_confidence or interval.state_confidence} / 수치 {interval.value_confidence})"
                 )
+                if decision.observed_stacks is not None:
+                    lines.append(f"  콜백 샘플링 중첩 수: {decision.observed_stacks};"
+                                 "이 시점은 실행 전 시점과 같지 않으므로, 이를 근거로 공식에 적용된 중첩 수를 대체하지 않습니다.")
                 lines.extend(_raw_modifier_lines(interval, decision))
                 if decision.reasons:
                     lines.append(f"  판정: {'；'.join(decision.reasons)}")
                 lines.extend((
                     f"  ID: {interval.source_effect_definition_id}",
                     f"  에셋: {interval.buff_asset_path}",
-                    f"  추정 근거: {interval.inference_basis}",
+                    f"  상태 근거: {interval.inference_basis}",
                 ))
         if not decisions:
             lines.extend((

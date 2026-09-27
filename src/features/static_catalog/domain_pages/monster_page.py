@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from src.i18n_display import ko_contains as _ko_contains
-
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -26,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.app.theme import themed_style
+from src.i18n_display import ko_contains as _ko_contains
 from src.features.static_catalog.domain_pages.monster_browse_models import (
     PLAY_COPY as _PLAY_COPY,
     PLAY_LABELS as _PLAY_LABELS,
@@ -309,8 +308,8 @@ class MonsterCatalogPage(FeastCatalogBrowserMixin, QWidget):
             "current": "현재 기", "next": "예정", "scheduled": "예정",
             "historical": "지난 기", "unscheduled": "일정 없음",
         }
-        ordinal = representative.primary_id.rsplit("_", 1)[-1]
-        title = f"{ordinal}기" if ordinal.isdigit() else representative.primary_id
+        season = self._controller.outer_buff(representative.primary_id)
+        title = season.entry.subtitle if season else _period_label(representative.primary_id)
         return BrowseCard(
             title,
             f"{len(rows) // 2}층 · 중국 서버 오픈 시간 기준으로 갱신",
@@ -323,15 +322,15 @@ class MonsterCatalogPage(FeastCatalogBrowserMixin, QWidget):
         )
 
     def _open_rotation(self, entries: tuple[CatalogEntry, ...]) -> None:
-        period_label = _period_label(entries[0].primary_id)
         levels = _group(entries, lambda row: _key_parts(row.key)[2])
         sections = []
         season_buff = self._controller.outer_buff(entries[0].primary_id)
+        period_label = season_buff.entry.subtitle if season_buff else _period_label(entries[0].primary_id)
         if season_buff is not None:
             sections.append(BrowseSection(
                 "이번 기 규칙", season_buff.entry.subtitle,
                 (BrowseCard(
-                    season_buff.entry.title, "정식 설명과 구조화된 세부 항목 보기", "시즌 Buff",
+                    season_buff.entry.title, "효과 설명 보기", "시즌 Buff",
                     self._first_icon(entries),
                     lambda checked=False, detail=season_buff: self.open_detail(detail),
                     formal_id=season_buff.entry.primary_id,
@@ -445,24 +444,24 @@ class MonsterCatalogPage(FeastCatalogBrowserMixin, QWidget):
             for prefix in ("스폰 슬롯", "몬스터 풀 구성원", "템플릿 바인딩")
         ) and "프로필" not in section.title)
         if not slot_sections and entry.play_mode == "feast":
-            slot_sections = tuple(section for section in detail.sections if section.title == "正式玩法配置")
+            slot_sections = tuple(section for section in detail.sections if section.title == "정식 콘텐츠 설정")
         cards = []
         for section in slot_sections:
             fields = {value.label: value.value for value in section.values}
-            path = fields.get("怪物类路径") or fields.get("类路径") or fields.get("模板路径") or ""
-            formal_id = fields.get("模板 ID") or fields.get("Boss 模板 ID") or _object_name(path)
+            path = fields.get("몬스터 클래스 경로") or fields.get("클래스 경로") or fields.get("템플릿 경로") or ""
+            formal_id = fields.get("템플릿 ID") or fields.get("Boss 템플릿 ID") or _object_name(path)
             target = self._match_member_relation(detail, section.title)
             if not target:
                 target = self._match_profile_relation(detail, formal_id)
             target_detail = self._controller.detail(target) if target else None
-            localized_name = fields.get("怪物中文名") or fields.get("Boss 中文名")
+            localized_name = fields.get("몬스터 중국어 이름") or fields.get("Boss 중국어 이름")
             if localized_name in {None, "", "不可用", "名称暂未提供"}:
                 localized_name = (
                     target_detail.entry.title
                     if target_detail and target_detail.entry.localization_available
                     else "名称暂未提供"
                 )
-            monster_level = fields.get("等级") or fields.get("配置等级")
+            monster_level = fields.get("레벨") or fields.get("설정 레벨")
             encounter_difficulty = self._controller.value(detail, "난이도")
             layer = self._controller.value(detail, "층")
             if monster_level:
@@ -626,7 +625,9 @@ class MonsterCatalogPage(FeastCatalogBrowserMixin, QWidget):
         for section in self._active_state.sections:
             cards = tuple(
                 card for card in section.cards
-                if (not query or _ko_contains(" ".join((card.title, card.subtitle, card.formal_id)), query))
+                if (not query or _ko_contains(" ".join((
+                    card.title, card.subtitle, card.formal_id,
+                )), query))
                 and (not self._category_filter or card.category == self._category_filter)
                 and (not difficulty or card.difficulty == difficulty)
                 and (not region or card.region == region)

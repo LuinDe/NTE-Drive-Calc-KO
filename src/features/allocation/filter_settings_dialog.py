@@ -97,7 +97,7 @@ class AllocationFilterSettingsDialog(QDialog):
         other_layout.setSpacing(6)
         other_layout.addWidget(QLabel("조합 수 상한"))
         self.combo_limit_edit = QLineEdit(str(current.blueprint_combo_limit))
-        self.combo_limit_edit.setPlaceholderText("기본값 500")
+        self.combo_limit_edit.setPlaceholderText("기본값 2000")
         self.combo_limit_edit.setFixedHeight(36)
         other_layout.addWidget(self.combo_limit_edit, 1)
         other_help = QPushButton("?", other_module)
@@ -108,7 +108,7 @@ class AllocationFilterSettingsDialog(QDialog):
             lambda _checked=False, parent=other_help: show_help(
                 parent,
                 "조합 수 상한 설명",
-                "각 우선순위 그룹에서 최대로 평가할 청사진 조합 수입니다. 값이 클수록 계산은 충실해지지만 시간이 더 오래 걸립니다. 기본값은 500입니다.",
+                "우선순위 그룹당 평가할 최대 청사진 조합 수입니다. 값이 클수록 계산은 더 충분해지지만 시간이 더 걸립니다; 기본값은 2000입니다.",
             )
         )
         other_layout.addWidget(other_help)

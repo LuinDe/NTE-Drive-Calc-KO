@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+from src.features.input_operation_entry import request_input_entry, show_input_unavailable
+
 import threading
 from typing import Any
 
 from PySide6.QtWidgets import QDialog, QMessageBox
 
 from src.app.workers import WorkerThread
+from src.features.drive_assembly.input_backends import PyAutoGuiMouseBackend
+from src.integrations.operation_guard import bind_execution_guard
 from src.features.drive_assembly.rewind_execution import (
     RewindExecutionRequest,
     execute_rewind_request,
@@ -35,6 +39,8 @@ class RewindExecutionUiMixin:
         self._save_plan_button.setText("방안 저장됨")
 
     def _configure_rewind(self) -> None:
+        if not request_input_entry(self, "interface_input", "게임 내 되감기"):
+            return
         dialog = RewindExecutionDialog(self, initial=self._rewind_options)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -46,6 +52,8 @@ class RewindExecutionUiMixin:
         self._start_rewind_execution()
 
     def _start_rewind_execution(self) -> None:
+        if not request_input_entry(self, "interface_input", "게임 내 되감기"):
+            return
         current_worker = self._rewind_worker
         if current_worker is not None:
             try:
@@ -69,6 +77,10 @@ class RewindExecutionUiMixin:
             )
             return
         stop_requested = threading.Event()
+        execution_guard = bind_execution_guard(
+            self.operation_guard, should_stop=stop_requested.is_set,
+            generation=self.operation_generation,
+        )
         if hotkey_manager is not None:
             hotkey_manager.start(
                 owner=self._rewind_hotkey_owner,
@@ -80,10 +92,14 @@ class RewindExecutionUiMixin:
 
         def run() -> object:
             stop_requested.wait(self._rewind_foreground_settle_seconds)
-            return execute_rewind_request(
-                request,
-                should_stop=stop_requested.is_set,
-            )
+            backend = PyAutoGuiMouseBackend(operation_guard=execution_guard)
+            try:
+                return execute_rewind_request(request, backend=backend, should_stop=stop_requested.is_set)
+            finally:
+                try:
+                    backend.force_mouse_release()
+                finally:
+                    backend.close()
 
         worker = WorkerThread(target=run, parent=self)
         self._rewind_worker = worker
@@ -129,6 +145,7 @@ class RewindExecutionUiMixin:
         self._start_rewind_button.setEnabled(True)
         self._start_rewind_button.setText("되감기 다시 진행")
         self._start_rewind_button.setToolTip(message)
+        show_input_unavailable(self, "게임 내 되감기", message)
 
     def _prepare_rewind_game_foreground(self) -> None:
         parent_getter = getattr(self, "parentWidget", None)

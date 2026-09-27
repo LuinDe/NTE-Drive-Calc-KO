@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from src.features.toolbox.rewind_preferences import preference_custom_percent as _preference_custom_percent
+
 from dataclasses import dataclass
 from typing import Callable
 
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -29,14 +32,14 @@ from PySide6.QtWidgets import (
 )
 
 from src.app.theme import themed_style
+from src.domain.role_name_order import role_name_sort_key
 from src.app.workers import WorkerThread
 from src.features.toolbox.cultivation_entry import (
     build_cultivation_calculator_entry,
-    show_cultivation_calculator,
 )
 from src.integrations.bundled_resources import bundled_game_ui_asset_root
 from src.services.game_ui_asset_catalog import GameUiAssetCatalog
-from src.services.cultivation_planner_service import CultivationPlannerService
+from src.ui.role_portrait import custom_role_portrait
 from src.services.rewind_shape_recommendation_service import (
     RewindShapeAnalysis,
     RewindShapeRecommendationService,
@@ -49,39 +52,15 @@ from src.features.toolbox.rewind_role_selection import (
 )
 from src.features.toolbox.rewind_slot_ui import RewindSlotUiMixin
 from src.features.toolbox.static_catalog_entry import build_static_catalog_entry
-
-
-@dataclass(frozen=True, slots=True)
-class ToolboxDependencies:
-    """Narrow account-bound dependencies assembled by ``src.ui.app``."""
-
-    rewind_service_factory: Callable[[], RewindShapeRecommendationService]
-    cultivation_service_factory: Callable[[], CultivationPlannerService]
-    navigate_static_catalog: Callable[[], None]
-
-    def rewind_service(self) -> RewindShapeRecommendationService:
-        return self.rewind_service_factory()
-
+from src.features.toolbox.toolbox_navigation import (
+    CultivationToolboxNavigation,
+    ToolboxDependencies,
+)
 
 @dataclass(frozen=True, slots=True)
 class _RewindUiCatalog:
     roles: tuple[RewindTargetRole, ...]
     owned_shape_counts: tuple[tuple[str, int], ...]
-
-
-def _preference_custom_percent(value: object) -> float | None:
-    """Read a persisted optional custom rewind threshold without trusting old data."""
-
-    if isinstance(value, bool):
-        return None
-    if not isinstance(value, (str, int, float)):
-        return None
-    try:
-        percent = float(value)
-    except (TypeError, ValueError):
-        return None
-    return percent if 1.0 <= percent <= 100.0 else None
-
 
 class ToolboxPage:
     """Builds a tile-based toolbox without introducing another primary domain."""
@@ -90,16 +69,27 @@ class ToolboxPage:
         self._dependencies = dependencies
         self._dialog_parent = dialog_parent
         self._page: QWidget | None = None
+        self._stack: QStackedWidget | None = None
+        self._home: QWidget | None = None
+        self._cultivation_navigation: CultivationToolboxNavigation | None = None
 
     def build(self) -> QWidget:
         if self._page is not None:
             return self._page
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self._stack = QStackedWidget(page)
+        self._stack.setObjectName("toolboxPageStack")
+        page_layout.addWidget(self._stack)
+
+        home = QWidget(self._stack)
+        home.setObjectName("toolboxHomePage")
+        layout = QVBoxLayout(home)
         layout.setContentsMargins(30, 28, 30, 28)
         layout.setSpacing(12)
 
-        tool_row = QFrame(page)
+        tool_row = QFrame(home)
         tool_row.setObjectName("toolboxRewindRecommendationRow")
         tool_row.setMinimumHeight(94)
         tool_row.setStyleSheet(themed_style(
@@ -137,22 +127,33 @@ class ToolboxPage:
 
         layout.addWidget(tool_row)
         layout.addWidget(build_cultivation_calculator_entry(
-            page,
-            open_calculator=lambda: show_cultivation_calculator(
-                self._dialog_parent,
-                service_factory=self._dependencies.cultivation_service_factory,
-            ),
+            home,
+            open_calculator=self._open_cultivation_calculator,
         ))
         layout.addWidget(build_static_catalog_entry(
-            page,
+            home,
             navigate=self._dependencies.navigate_static_catalog,
         ))
         layout.addStretch()
+        self._home = home
+        self._stack.addWidget(home)
+        self._cultivation_navigation = CultivationToolboxNavigation(
+            stack=self._stack,
+            home=home,
+            dependencies=self._dependencies,
+            dialog_parent=self._dialog_parent,
+        )
         self._page = page
         return page
-
     def refresh(self) -> None:
-        """The page stores no account data; analysis is rebuilt on every open."""
+        """Discard an account-bound draft only when its frozen identity changed."""
+
+        if self._cultivation_navigation is not None:
+            self._cultivation_navigation.refresh()
+
+    def _open_cultivation_calculator(self) -> None:
+        if self._cultivation_navigation is not None:
+            self._cultivation_navigation.open()
 
     def _show_rewind_recommendation(self) -> None:
         try:
@@ -160,11 +161,8 @@ class ToolboxPage:
         except Exception as exc:
             QMessageBox.warning(self._dialog_parent, "되감기 추천", f"되감기 분석 데이터 읽기 실패: {exc}")
             return
-        dialog = _RewindRecommendationDialog(service, self._dialog_parent)
+        dialog = _RewindRecommendationDialog(service, self._dialog_parent, operation_guard=self._dependencies.operation_guard, operation_generation=self._dependencies.operation_generation, operation_entry=self._dependencies.operation_entry, operation_unavailable=self._dependencies.operation_unavailable)
         dialog.exec()
-
-
-
 class _RoleSelectionDialog(QDialog):
     """Avatar-card picker shared by target-role and main-role selections."""
 
@@ -176,13 +174,14 @@ class _RoleSelectionDialog(QDialog):
         description: str,
         roles: tuple[RewindTargetRole, ...],
         selected_character_ids: set[int],
+        asset_root=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(720, 620)
         self._cards: list[tuple[QToolButton, int, str]] = []
         selected = {int(value) for value in selected_character_ids}
-        catalog = GameUiAssetCatalog(bundled_game_ui_asset_root())
+        catalog = GameUiAssetCatalog(asset_root or bundled_game_ui_asset_root())
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -218,20 +217,18 @@ class _RoleSelectionDialog(QDialog):
         self._grid.setHorizontalSpacing(8)
         self._grid.setVerticalSpacing(8)
         self._grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        for role in roles:
+        for role in sorted(roles, key=lambda item: (role_name_sort_key(item.name), item.character_id)):
             card = QToolButton(content)
             card.setObjectName("rewindRoleSelectionCard")
             card.setCheckable(True)
             card.setChecked(role.character_id in selected)
             configure_rewind_role_score_card(card, role)
             avatar_path = catalog.character_icon(role.character_id)
-            if avatar_path is not None:
+            if role.is_custom or avatar_path is not None:
                 card.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
                 card.setIconSize(QSize(76, 76))
-                card.setIcon(QIcon(str(avatar_path)))
+                card.setIcon(QIcon(custom_role_portrait(76, card.devicePixelRatioF())) if role.is_custom else QIcon(str(avatar_path)))
             else:
-                # Account-defined roles have no game portrait; show their name
-                # directly instead of reserving a misleading empty image card.
                 card.setToolButtonStyle(Qt.ToolButtonTextOnly)
             card.setStyleSheet(themed_style(
                 "QToolButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
@@ -292,8 +289,12 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
         "focused": "소수 집중",
     }
 
-    def __init__(self, service: RewindShapeRecommendationService, parent: QWidget) -> None:
+    def __init__(self, service: RewindShapeRecommendationService, parent: QWidget, *, operation_guard: Callable[[str], None] | None = None, operation_generation: Callable[[], object] | None = None, operation_entry: Callable[[str, str], bool] | None = None, operation_unavailable: Callable[[str, str, str], None] | None = None) -> None:
         super().__init__(parent)
+        self.operation_guard = operation_guard
+        self.operation_generation = operation_generation
+        self.operation_entry = operation_entry
+        self.operation_unavailable = operation_unavailable
         self._service = service
         self._roles: tuple[RewindTargetRole, ...] = ()
         self._role_names: dict[int, str] = {}
@@ -612,6 +613,7 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
             description="육성하려는 캐릭터를 선택하세요. 되감기는 이 캐릭터들에게 필요한 카트리지의 드라이브 형태를 우선 채웁니다.",
             roles=self._roles,
             selected_character_ids=self._target_character_ids,
+            asset_root=getattr(self._service, "asset_root", None),
         )
         if dialog.exec() == QDialog.Accepted:
             self._target_character_ids = set(dialog.selected_character_ids())
@@ -627,6 +629,7 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
             description="다중 선택 가능. 소수 집중은 이 캐릭터들의 목표 등급 미달 장착 드라이브만 분석합니다.",
             roles=self._roles,
             selected_character_ids=self._main_character_ids,
+            asset_root=getattr(self._service, "asset_root", None),
         )
         if dialog.exec() == QDialog.Accepted:
             self._main_character_ids = set(dialog.selected_character_ids())

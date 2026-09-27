@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from src.utils.logger import logger
 from src.utils.exceptions import OCRParseError
+from src.integrations.ocr_model_resources import rapidocr_model_kwargs
 
 import logging
 
@@ -170,10 +171,10 @@ def _warmup(ocr):
     ocr(_test_img)
 
 
-def _create_openvino_ocr():
+def _create_openvino_ocr(model_kwargs: dict[str, str]):
     try:
         from rapidocr_openvino import RapidOCR
-        ocr = RapidOCR(use_cls=False)
+        ocr = RapidOCR(use_cls=False, **model_kwargs)
         _warmup(ocr)
         return ocr, "OpenVINO (Intel CPU/내장 그래픽 가속)"
     except SystemExit as e:
@@ -183,13 +184,19 @@ def _create_openvino_ocr():
     return None, ""
 
 
-def _create_directml_ocr(providers: list[str]):
+def _create_directml_ocr(providers: list[str], model_kwargs: dict[str, str]):
     if "DmlExecutionProvider" not in providers:
         logger.warning(f"현재 ONNX Runtime에 DirectML Provider가 없습니다. 사용 가능한 Provider: {providers}")
         return None, ""
     try:
         from rapidocr_onnxruntime import RapidOCR
-        ocr = RapidOCR(use_cls=False, det_use_dml=True, cls_use_dml=True, rec_use_dml=True)
+        ocr = RapidOCR(
+            use_cls=False,
+            det_use_dml=True,
+            cls_use_dml=True,
+            rec_use_dml=True,
+            **model_kwargs,
+        )
         _warmup(ocr)
         return ocr, "DirectML GPU"
     except Exception as e:
@@ -197,10 +204,10 @@ def _create_directml_ocr(providers: list[str]):
         return None, ""
 
 
-def _create_onnx_cpu_ocr():
+def _create_onnx_cpu_ocr(model_kwargs: dict[str, str]):
     try:
         from rapidocr_onnxruntime import RapidOCR
-        ocr = RapidOCR(use_cls=False)
+        ocr = RapidOCR(use_cls=False, **model_kwargs)
         _warmup(ocr)
         return ocr, "ONNX Runtime CPU (범용 모드)"
     except Exception as e:
@@ -214,6 +221,7 @@ def _create_ocr_engine(backend_preference: str | None = None):
     OpenVINO is the default. DirectML is only used when explicitly requested by
     a caller or NTE_OCR_BACKEND=directml/auto and a discrete adapter is detected.
     """
+    model_kwargs = rapidocr_model_kwargs()
     adapter_names = _get_video_adapter_names()
     has_discrete_gpu = _has_discrete_gpu(adapter_names)
     backend_pref = _ocr_backend_preference(backend_preference)
@@ -231,17 +239,17 @@ def _create_ocr_engine(backend_preference: str | None = None):
             f"{mode_label}을(를) 켰습니다: DirectML을 비활성화하고 OCR/이미지 처리 스레드를 제한하며 저부하 OCR 초기화를 사용합니다."
         )
         _apply_low_load_runtime_limits()
-        ocr, engine_type = _create_openvino_ocr()
+        ocr, engine_type = _create_openvino_ocr(model_kwargs)
         if ocr is not None:
             return ocr, f"{engine_type} / {mode_label}"
-        ocr, engine_type = _create_onnx_cpu_ocr()
+        ocr, engine_type = _create_onnx_cpu_ocr(model_kwargs)
         if ocr is not None:
             return ocr, f"{engine_type} / {mode_label}"
         raise ImportError(f"{mode_label}에서 사용 가능한 RapidOCR 추론 엔진을 찾지 못했습니다")
 
     if backend_pref in {"directml", "auto"} and has_discrete_gpu:
         logger.info(f"OCR 백엔드가 {backend_pref}(으)로 설정되어 있고 외장 그래픽이 감지되어 DirectML GPU 가속을 시도합니다.")
-        ocr, engine_type = _create_directml_ocr(providers)
+        ocr, engine_type = _create_directml_ocr(providers, model_kwargs)
         if ocr is not None:
             return ocr, engine_type
     elif backend_pref in {"directml", "auto"}:
@@ -252,11 +260,11 @@ def _create_ocr_engine(backend_preference: str | None = None):
         logger.info("외장 그래픽이 감지되지 않아 OpenVINO 가속을 우선 사용합니다.")
 
     if backend_pref != "cpu":
-        ocr, engine_type = _create_openvino_ocr()
+        ocr, engine_type = _create_openvino_ocr(model_kwargs)
         if ocr is not None:
             return ocr, engine_type
 
-    ocr, engine_type = _create_onnx_cpu_ocr()
+    ocr, engine_type = _create_onnx_cpu_ocr(model_kwargs)
     if ocr is not None:
         return ocr, engine_type
 

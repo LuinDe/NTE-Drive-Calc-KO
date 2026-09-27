@@ -125,7 +125,11 @@ def _load_weighted_persistence(window, database_path: Path) -> None:
     window.weighted_save_button.setEnabled(False)
     _set_weighted_equipment_actions_enabled(window, False)
     _clear_layout(window.weighted_result_layout)
-    persistence = read_weighted_allocation_persistence(database_path)
+    persistence = read_weighted_allocation_persistence(
+        database_path,
+        weighted_allocation_dependencies(window).static_database_path,
+        weighted_allocation_dependencies(window).equipment_only,
+    )
     weights_changed = not _persistence_weights_match_account(window, persistence)
     _apply_weighted_persisted_preferences(window, persistence)
     if weights_changed:
@@ -520,12 +524,7 @@ def _show_empty_curtain_preferences(window, role_name: str) -> None:
         )
     )
     stats_layout.addLayout(stat_options)
-    priority_tip = QLabel(
-        "서브 스탯 블랙리스트는 기본적으로 드라이브 후보 풀에서 먼저 강제 필터하며 카트리지는 제외하지 않습니다. “블랙리스트 0 가중치”를 켜면 드라이브 Top-K 점수에서 0점으로 계산합니다."
-        "세트와 카트리지 메인 스탯은 그다음 강제 필터합니다."
-        "서브 스탯 직접 선택은 연속 접두 기준의 가장 깊은 후보 풀을 먼저 사용하고,"
-        "조합이 없으면 단계적으로 완화한 뒤 마지막에 전체 후보 풀로 복귀합니다."
-    )
+    priority_tip = QLabel('블랙리스트는 기본적으로 드라이브를 제외합니다; 자세한 필터링 및 폴백 규칙은 "?"를 참조하세요.')
     priority_tip.setWordWrap(True)
     stats_layout.addWidget(priority_tip)
     layout.addWidget(stats_box)

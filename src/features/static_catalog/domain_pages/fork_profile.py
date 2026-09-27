@@ -44,6 +44,7 @@ from src.services.static_catalog_fork_service import (
     ForkModifier,
     ForkRefinementLevel,
 )
+from src.ui.progression_material_card import ProgressionMaterialCard
 
 
 class ForkProfileView(QWidget):
@@ -69,6 +70,7 @@ class ForkProfileView(QWidget):
         self._panel_values: dict[str, float] = {}
         self._character_cards: list[ForkCharacterCard] = []
         self._breakthrough_cards: list[QFrame] = []
+        self._exp_material_cards: list[ProgressionMaterialCard] = []
         self._refinement_cost_cards: list[QFrame] = []
         self._build()
 
@@ -246,6 +248,10 @@ class ForkProfileView(QWidget):
         ))
         current.layout().addWidget(self.current_level_cost)
         self._cultivation_layout.addWidget(current)
+        self.exp_material_host = self._panel("레벨업 경험치 재료")
+        self.exp_material_grid = QGridLayout()
+        self.exp_material_host.layout().addLayout(self.exp_material_grid)
+        self._cultivation_layout.addWidget(self.exp_material_host)
         self.breakthrough_host = self._panel("돌파 경로 · 소모")
         self.breakthrough_grid = QGridLayout()
         self.breakthrough_host.layout().addLayout(self.breakthrough_grid)
@@ -391,7 +397,7 @@ class ForkProfileView(QWidget):
         material_text = breakthrough_cost_text(stage, self._item_names)
         self.current_level_cost.setText(
             f"Lv.{self._level} · {stage_text} · {exp_text}\n{material_text}\n"
-            "레벨별 레벨업 소모: 현재 정식 데이터가 제공되지 않으며, 0으로 대체 표시하지 않습니다."
+            "레벨당 경험치는 정식 레벨 곡선에서 가져옵니다. 사용 가능한 레벨업 재료 규격은 아래를 참고하세요."
         )
         self._refresh_refinement()
         self._refresh_node_states()
@@ -528,19 +534,49 @@ class ForkProfileView(QWidget):
             self.characters_grid.setColumnStretch(column, 1 if column < columns else 0)
 
     def _render_cultivation_routes(self) -> None:
+        clear_layout(self.exp_material_grid)
         clear_layout(self.breakthrough_grid)
         clear_layout(self.refinement_cost_grid)
         self._breakthrough_cards.clear()
+        self._exp_material_cards.clear()
         self._refinement_cost_cards.clear()
         detail = self._detail
         if detail is None:
             return
+        for material in detail.experience_materials:
+            costs = self._item_names.present_costs(material.costs)
+            detail_text = f"{material.experience_value:,} EXP/개"
+            cost_text = self._item_names.player_text(costs)
+            if cost_text:
+                detail_text += f" · 사용 소모 {cost_text}"
+            card = ProgressionMaterialCard(
+                name=material.name_zh or material.item_id,
+                amount_text=f"{material.experience_value:,} EXP",
+                icon_path=self._asset_catalog.progression_item_icon(
+                    material.item_id
+                ),
+                detail_text=detail_text,
+                parent=self.exp_material_host,
+            )
+            self._exp_material_cards.append(card)
         for stage in detail.breakthroughs:
             card = self._panel(f"{stage.stage}단계 · 상한 Lv.{stage.max_fork_level}")
-            card.layout().addWidget(self._info_row(
-                "소모",
-                breakthrough_cost_text(stage, self._item_names).removeprefix("消耗："),
-            ))
+            displayed_costs = self._item_names.present_costs(
+                (*stage.item_costs, *stage.gold_costs)
+            )
+            if displayed_costs:
+                for cost in displayed_costs:
+                    item_id = cost.canonical_item_id or cost.raw_item_id
+                    card.layout().addWidget(ProgressionMaterialCard(
+                        name=cost.display_name,
+                        amount_text=f"× {cost.amount_text}",
+                        icon_path=(
+                            self._asset_catalog.progression_item_icon(item_id)
+                        ),
+                        parent=card,
+                    ))
+            else:
+                card.layout().addWidget(self._info_row("소모", "아직 제공되지 않음"))
             modifier_text = "、".join(
                 f"{item.property_name_zh or item.property_id} {item.display_value}"
                 for item in stage.modifiers
@@ -562,13 +598,22 @@ class ForkProfileView(QWidget):
         self._layout_cultivation_cards()
 
     def _layout_cultivation_cards(self) -> None:
+        while self.exp_material_grid.count():
+            self.exp_material_grid.takeAt(0)
         while self.breakthrough_grid.count():
             self.breakthrough_grid.takeAt(0)
         while self.refinement_cost_grid.count():
             self.refinement_cost_grid.takeAt(0)
         width = max(1, self.breakthrough_host.width())
+        exp_columns = 3 if width >= 900 else 2 if width >= 560 else 1
         breakthrough_columns = 2 if width >= 900 else 1
         refinement_columns = 3 if width >= 900 else 2 if width >= 560 else 1
+        for index, card in enumerate(self._exp_material_cards):
+            self.exp_material_grid.addWidget(
+                card,
+                index // exp_columns,
+                index % exp_columns,
+            )
         for index, card in enumerate(self._breakthrough_cards):
             self.breakthrough_grid.addWidget(
                 card,
@@ -582,6 +627,9 @@ class ForkProfileView(QWidget):
                 index % refinement_columns,
             )
         for column in range(3):
+            self.exp_material_grid.setColumnStretch(
+                column, 1 if column < exp_columns else 0,
+            )
             self.breakthrough_grid.setColumnStretch(
                 column, 1 if column < breakthrough_columns else 0,
             )
@@ -593,7 +641,11 @@ class ForkProfileView(QWidget):
         super().resizeEvent(event)
         if self._character_cards:
             self._layout_character_cards()
-        if self._breakthrough_cards or self._refinement_cost_cards:
+        if (
+            self._exp_material_cards
+            or self._breakthrough_cards
+            or self._refinement_cost_cards
+        ):
             self._layout_cultivation_cards()
 
     def _refresh_node_states(self) -> None:

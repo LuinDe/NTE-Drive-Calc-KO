@@ -27,7 +27,7 @@ from src.utils.name_resolver import resolve_name
 from src.utils.set_name import normalize_set_display_name
 
 class BaseDispatchStrategy:
-    DEFAULT_COMBO_LIMIT = 500
+    DEFAULT_COMBO_LIMIT = 2000
 
     def __init__(
         self,

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.app.constants import APP_VERSION
 from src.integrations.nte_core import NteCoreClient
+from src.integrations.native_allocation import create_allocation_executor
 from src.scanner.batch_processor import BatchProcessor
 from src.solver.orchestrator import NTEPipelineOrchestrator
 from src.storage.sqlite.user_data_dao import UserDataDao
@@ -24,6 +25,7 @@ class NTEAppFacade:
         screenshot_dir: str | Path | None = None,
         log_dir: str | Path | None = None,
         app_dir: str | Path | None = None,
+        allocation_static_database_path: str | Path | None = None,
     ):
         self.config_dir = str(config_dir)
         self.user_config_dir = str(user_config_dir)
@@ -33,6 +35,10 @@ class NTEAppFacade:
         )
         self.log_dir = Path(log_dir) if log_dir is not None else None
         self.app_dir = Path(app_dir) if app_dir is not None else None
+        self.allocation_static_database_path = (
+            Path(allocation_static_database_path)
+            if allocation_static_database_path is not None else None
+        )
 
     def execute_vision_processing(self, input_dir=None):
         resolved_input_dir = (
@@ -67,14 +73,19 @@ class NTEAppFacade:
         crit_rate_baselines=None,
         custom_weapons=None,
         locked_uids=None,
-        blueprint_combo_limit: int = 500,
+        blueprint_combo_limit: int = 2000,
         cancel_check=None,
     ):
         """使用已经固定的数据集合计算，不要求生成中间库存文件。"""
 
+        allocation_executor = create_allocation_executor(
+            static_database_path=self.allocation_static_database_path,
+            cancel_check=cancel_check,
+        )
         orchestrator = NTEPipelineOrchestrator(
             config_dir=self.config_dir,
             user_database_path=self.user_database_path,
+            static_database_path=self.allocation_static_database_path,
         )
         locked_uids = set(locked_uids or ())
         base_mode = mode
@@ -106,6 +117,7 @@ class NTEAppFacade:
             custom_weapons=custom_weapons or {},
             blueprint_combo_limit=blueprint_combo_limit,
             cancel_check=cancel_check,
+            allocation_executor=allocation_executor,
         )
         return final_plan, None
 

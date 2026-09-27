@@ -36,6 +36,7 @@ class PostActionEvaluator:
         selected_roles: list[str] | None = None,
         config_dir=None,
         user_database_path: str | Path | None = None,
+        static_database_path: str | Path | None = None,
     ):
         self.raw_config = post_actions_config
         self.selected_roles = selected_roles
@@ -45,16 +46,17 @@ class PostActionEvaluator:
         self.user_database_path = (
             Path(user_database_path) if user_database_path is not None else None
         )
+        self.static_database_path = Path(static_database_path) if static_database_path is not None else None
 
     def evaluate(self, parsed_items: list[tuple[int, object, str]], inventory) -> PostActionEvaluation:
         effective_config = merge_post_action_config(self.raw_config) if self.raw_config else None
         if not effective_config or not post_actions_enabled(effective_config):
             return PostActionEvaluation(config=effective_config, enabled=False)
 
-        scoring = ScoringEngine(
-            str(self.config_dir),
-            user_database_path=self.user_database_path,
-        )
+        scoring_kwargs = {"user_database_path": self.user_database_path}
+        if self.static_database_path is not None:
+            scoring_kwargs["static_database_path"] = self.static_database_path
+        scoring = ScoringEngine(str(self.config_dir), **scoring_kwargs)
         has_preserve_rules = bool(effective_config.get("preserve_rules"))
         if not scoring.roles_db and not has_preserve_rules:
             return PostActionEvaluation(config=effective_config, enabled=True)
@@ -65,11 +67,12 @@ class PostActionEvaluator:
             selected_roles = _selected_role_names(
                 scoring.roles_db,
                 effective_config.get("selected_character_ids", []),
+                self.static_database_path,
             )
-        score_context = PostActionScoreContext.from_config_dir(
-            str(self.config_dir),
-            user_database_path=self.user_database_path,
-        )
+        context_kwargs = {"user_database_path": self.user_database_path}
+        if self.static_database_path is not None:
+            context_kwargs["static_database_path"] = self.static_database_path
+        score_context = PostActionScoreContext.from_config_dir(str(self.config_dir), **context_kwargs)
         if score_context.strict:
             logger.info(
                 "[상태 관리] 실제 사용 가능한 캐릭터 점수를 켰습니다:"
@@ -98,26 +101,6 @@ class PostActionEvaluator:
             f"유형 범위 {filter_summary.get('post_action_type_range_filtered_count', 0)}개,"
             f"보존 규칙 적중 {filter_summary.get('preserve_rule_matched_count', 0)}개"
         )
-        for change in state_changes:
-            decision = change.get("decision", {}) or {}
-            lock_detail = decision.get("lock", {}) or {}
-            discard_detail = decision.get("discard", {}) or {}
-            preserve_detail = decision.get("preserve", {}) or {}
-            chosen = lock_detail if change.get("target_state") == "locked" else discard_detail
-            if preserve_detail.get("action"):
-                chosen = preserve_detail
-            if change.get("target_state") == "normal" and not preserve_detail.get("action"):
-                chosen = lock_detail if change.get("current_state") == "locked" else discard_detail
-            logger.info(
-                f"[상태 관리] 대상 raw_drive_{int(change.get('index', 0)):04d}"
-                f"{change.get('current_state')} -> {change.get('target_state')} "
-                f"type={change.get('item_type')} quality={change.get('quality')} "
-                f"shape={change.get('shape_id')} set={change.get('set_name')} "
-                f"best_role={chosen.get('role', '')} score={float(chosen.get('score', 0.0) or 0.0):.2f} "
-                f"grade={chosen.get('grade', '')} threshold={chosen.get('threshold', '')} "
-                f"eligible_roles={chosen.get('eligible_roles', 0)} mode={chosen.get('match_mode', '')} "
-                f"reason={chosen.get('reason', '')} sub_stats={change.get('sub_stats')}"
-            )
         return PostActionEvaluation(
             config=effective_config,
             enabled=True,
@@ -129,6 +112,7 @@ class PostActionEvaluator:
 def _selected_role_names(
     roles_db: dict[str, Any],
     selected_character_ids: list[int] | tuple[int, ...],
+    static_database_path: str | Path | None = None,
 ) -> list[str]:
     """Resolve the management dialog's role IDs to scoring role names.
 
@@ -147,7 +131,7 @@ def _selected_role_names(
             selected_ids.add(character_id)
     if not selected_ids:
         return []
-    with StaticGameDataDao() as static_dao:
+    with (StaticGameDataDao(static_database_path) if static_database_path is not None else StaticGameDataDao()) as static_dao:
         selected_keys = {
             static_dao.get_logical_character_key(character_id)
             or f"custom:{character_id}"

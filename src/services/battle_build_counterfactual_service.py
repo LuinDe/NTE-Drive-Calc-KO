@@ -62,7 +62,7 @@ _STRUCTURED_VITAL_METHODS = {
     "mechanic_enabled_expected_hp_ratio", "fadia_source_max_hp_ratio", "mechanic_disabled",
 }
 class BattleBuildCounterfactualService:
-    """Compare two independently replayed builds while preserving the real axis."""
+    """DEPRECATED：旧副本反事实实现，仅作离线差分；正式分析使用 battle_page_v1。"""
 
     @classmethod
     def compare(
@@ -73,6 +73,7 @@ class BattleBuildCounterfactualService:
         progress_callback: BattleAnalysisProgressCallback | None = None,
         projection_memo: BattleBuffProjectionMemo | None = None,
     ) -> BattleBuildCounterfactual:
+        """DEPRECATED：离线差分入口；正式装备副本比较由原生页面计算。"""
         if original.battle_record_id != candidate.battle_record_id:
             raise ValueError("현재 기준선과 후보 구성이 같은 전투 리포트에 속하지 않습니다")
         if (

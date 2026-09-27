@@ -183,8 +183,8 @@ class LoadoutSlotSelectionService:
         )
         if summary is None or summary.get("source") != "nte_core":
             raise UserDataValidationError(
-                f"[{selection.role_name} · {selection.slot_name}]은(는) 공식 가방 스냅샷에서 온 것이 아닙니다."
-                "고속 장착은 nte-core 원본 UID만 지원합니다"
+                f"[{selection.role_name} · {selection.slot_name}]은(는) 네이티브 동기화 가방을 기반으로 하지 않습니다;"
+                "고속 장착에는 네이티브 동기화에서 제공하는 장비 식별자가 필요합니다"
             )
 
     @staticmethod

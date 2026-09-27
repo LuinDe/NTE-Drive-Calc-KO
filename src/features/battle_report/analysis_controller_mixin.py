@@ -287,7 +287,9 @@ class BattleReportAnalysisControllerMixin:
         record_id = request.load.battle_record_id
         if analysis is None or not analysis.timeline_hits:
             self._page.end_analysis_details()
-            if request.load.detail_level != "marginal":
+            if request.load.detail_level in {"hit", "buff", "composition"}:
+                self._page.show_analysis_detail_error("현재 상세 정보에 사용 가능한 히트별 분석 결과가 없습니다.")
+            elif request.load.detail_level != "marginal":
                 self._page.clear_analysis(
                     "현재 기록에는 집계 요약만 있거나, 선택한 구간에 정식 히트별 근거가 없습니다."
                 )
@@ -355,7 +357,13 @@ class BattleReportAnalysisControllerMixin:
         ):
             return
         self._page.end_analysis_details()
-        if request.load.detail_level != "marginal":
+        if message == "작업이 취소되었습니다":
+            return
+        if request.load.detail_level == "composition":
+            self._page.show_analysis_detail_error(f"브레이크 귀속이 완료되지 않음: {message}")
+        elif request.load.detail_level in {"hit", "buff"}:
+            self._page.show_analysis_detail_error(f"현재 상세 정보가 완료되지 않음: {message}")
+        elif request.load.detail_level != "marginal":
             self._page.clear_analysis(f"전투 리포트 히트별 분석 읽기 실패: {message}")
         log_event(
             "WARNING",
@@ -374,16 +382,14 @@ class BattleReportAnalysisControllerMixin:
         self._active_analysis_load = None
         self._active_analysis_load_invalidated = False
         worker.deleteLater()
-        if self._pending_analysis_load is None:
-            self._page.end_analysis_details()
         self._start_pending_analysis_load()
 
     def _load_analysis_details(self, kind: str, payload: object = None) -> None:
         record_id = self._latest_state.battle_record_id
         if record_id is None or self.is_running():
             return
-        detail_level = "hit" if kind == "composition" else kind
-        if detail_level not in {"hit", "buff"}:
+        detail_level = kind
+        if detail_level not in {"hit", "buff", "composition"}:
             return
         base = self._latest_analysis_load_request
         if base is None or base.battle_record_id != record_id:

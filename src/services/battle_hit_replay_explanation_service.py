@@ -22,6 +22,7 @@ from src.services.battle_buff_attribute_projection_service import (
     BattleBuffAttributeProjectionService,
 )
 from src.services.skill_name_rendering_service import preferred_battle_damage_name
+from src.services.battle_hit_critical_explanation import critical_explanation
 
 
 _FORMULA_FACTOR_IDS = (
@@ -562,10 +563,7 @@ class BattleHitReplayExplanationService:
                     "기댓값 기준: 내림 처리한 비치명타/치명타 후보를 치명 확률로 가중;"
                     "실제 기댓값은 이번 히트의 부호 있는 오차에 비례해 보정합니다."
                 ),
-                (
-                    f"치명타 추정: {_CRIT_STATES.get(replay.critical_state, replay.critical_state)}"
-                    f"(신뢰도 {replay.confidence})"
-                ),
+                critical_explanation(hit, replay),
                 "",
             ))
             if replay.observed_damage_source != "reported_hit":

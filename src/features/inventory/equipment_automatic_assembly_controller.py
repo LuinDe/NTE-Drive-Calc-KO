@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from src.features.input_operation_entry import request_input_entry, show_input_unavailable
+
 import threading
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,8 @@ from PySide6.QtWidgets import (
 
 from src.app.theme import current_style_sheet
 from src.app.workers import WorkerThread
+from src.features.drive_assembly.input_backends import PyAutoGuiMouseBackend
+from src.integrations.operation_guard import bind_execution_guard
 from src.features.drive_assembly.ui_bridge import (
     execute_all_roles_from_current_game_page,
     execute_selected_role_from_current_game_page,
@@ -162,6 +166,8 @@ def _start_automatic_equipment_assembly(
     slot_ids: list[int] | None = None,
 ) -> None:
     """在工作线程中执行逐步游戏界面自动装配。"""
+    if not request_input_entry(window, "interface_input", "자동 장착"):
+        return
 
     current_worker = getattr(window, "_automatic_equipment_apply_worker", None)
     if current_worker is not None and current_worker.isRunning():
@@ -178,7 +184,7 @@ def _start_automatic_equipment_assembly(
             slot_ids=slot_ids,
         )
     except Exception as exc:
-        QMessageBox.warning(window, "자동 장착", f"공식 SQLite 방안을 읽을 수 없습니다: {exc}")
+        QMessageBox.warning(window, "자동 장착", f"저장된 방안 읽기 실패: {exc}")
         return
 
     execution_role_names = list(state)
@@ -212,6 +218,10 @@ def _start_automatic_equipment_assembly(
         )
         return
     stop_requested = threading.Event()
+    execution_guard = bind_execution_guard(
+        getattr(window, "operation_guard", None), should_stop=stop_requested.is_set,
+        generation=getattr(window, "operation_generation", None),
+    )
     if hotkey_manager is not None:
         hotkey_manager.start(owner=hotkey_owner, on_stop=stop_requested.set)
     show_minimized = getattr(window, "showMinimized", None)
@@ -224,6 +234,7 @@ def _start_automatic_equipment_assembly(
             return execute_selected_role_from_current_game_page(
                 state,
                 execution_role_names[0],
+                backend=PyAutoGuiMouseBackend(operation_guard=execution_guard),
                 template_dir=str(template_dir),
                 record_root=record_root,
                 role_name_aliases=aliases,
@@ -231,6 +242,7 @@ def _start_automatic_equipment_assembly(
             )
         return execute_all_roles_from_current_game_page(
             state,
+            backend=PyAutoGuiMouseBackend(operation_guard=execution_guard),
             template_dir=str(template_dir),
             record_root=record_root,
             role_name_aliases=aliases,
@@ -262,11 +274,7 @@ def _start_automatic_equipment_assembly(
         if hotkey_manager is not None:
             hotkey_manager.stop(owner=hotkey_owner)
         _return_to_equipment_after_assembly(window)
-        QMessageBox.critical(
-            window,
-            "자동 장착 실패",
-            f"자동 장착을 완료하지 못했습니다:\n{message}",
-        )
+        show_input_unavailable(window, "자동 장착", str(message))
 
     worker.result_ready.connect(on_result)
     worker.error.connect(on_error)
@@ -317,6 +325,8 @@ def _preview_automatic_assemble_role(
     confirmed: bool = False,
 ) -> None:
     """确认后通过游戏界面自动化装配一个角色。"""
+    if not request_input_entry(window, "interface_input", "자동 장착"):
+        return
 
     if not confirmed:
         result = QMessageBox.question(
@@ -344,6 +354,8 @@ def _preview_automatic_assemble_all_roles(
     role_names: list[str] | None = None,
 ) -> None:
     """确认后通过游戏界面自动化装配全部已保存角色。"""
+    if not request_input_entry(window, "interface_input", "자동 장착"):
+        return
 
     requested_roles = tuple(
         dict.fromkeys(str(name) for name in (role_names or ()))
@@ -375,14 +387,14 @@ def _preview_automatic_assemble_all_roles(
         QMessageBox.warning(
             window,
             "자동 장착",
-            f"공식 SQLite 방안을 읽을 수 없습니다: {exc}",
+            f"저장된 방안 읽기 실패: {exc}",
         )
         return
     if not selections:
         QMessageBox.information(
             window,
             "자동 장착",
-            "현재 공식 가방 스냅샷에서 온 저장된 방안이 없습니다. 먼저 다시 계산하고 저장하세요.",
+            "현재 네이티브 동기화 가방 기반의 저장된 방안이 없습니다. 먼저 다시 계산하고 저장해 주세요.",
         )
         return
     result = QMessageBox.question(

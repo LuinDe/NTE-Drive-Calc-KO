@@ -206,10 +206,10 @@ class BattleTargetVitalPanel(QWidget):
             ),
         )
         layout.addWidget(self.event_table)
-        self.note = QLabel(
-            "HP 상한 정산 = 변화 전 같은 하프·같은 인스턴스·같은 이전 상한의 인근 히트 중 최소 "
-            "HPAfter ÷ 이전 HPMax × HPMax 감소량입니다. 정식 히트는 덮어쓰지 않으며,"
-            "관측 HP 소모 = 분석 유효 피해 + 미설명 차액입니다."
+        self.note = QLabel("생명 상한 변화는 별도로 정산됩니다; 원시 히트별 데이터는 수정하지 않습니다.")
+        self.note.setToolTip(
+            "정산 값은 같은 하프, 같은 대상, 같은 이전 상한 부근에서 히트별 최소 잔여 생명 비율을 취하며,"
+            "여기에 상한 감소량을 곱합니다. 설명되지 않은 HP 소모는 별도로 표시됩니다."
         )
         self.note.setWordWrap(True)
         self.note.setStyleSheet(themed_style("color:#d29922;font-size:12px"))
@@ -396,7 +396,7 @@ class BattleTargetVitalPanel(QWidget):
             "user_confirmed_single_target": (
                 "이 기록에는 정식 대상 인스턴스 ID가 없습니다. 사용자가 대상을 하나만 선택한다고 명시했으므로"
                 "분석 투영이 적을 향한 모든 히트를 해당 대상에 바인딩했습니다. 이 신원은 사용자 근거에 속하며"
-                "HP 근거 그룹화에만 쓰이고, nte-core 원본 인스턴스 ID로 기록되거나 이를 대신하지 않으며,"
+                "HP 근거 그룹화에만 사용되며, 수집된 대상 식별 정보를 다시 기록하거나 대체하지 않습니다,"
                 "새 히트의 적 속성에 대한 주요 대상 폴백으로도 쓰이지 않습니다."
             ),
         }.get(

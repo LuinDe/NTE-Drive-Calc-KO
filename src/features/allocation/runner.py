@@ -28,7 +28,6 @@ from src.optimizer.contracts import (
     PLAN_ASSIGNED_TAPE,
     PLAN_BLUEPRINT,
     PLAN_CHANGED_UIDS,
-    PLAN_SCORE,
     PLAN_VALID,
     ROLE_BLUEPRINT_LAYOUT,
     ROLE_EQUIPPED_DRIVES,
@@ -41,7 +40,6 @@ from src.services.allocation_filter_settings import (
     filter_allocation_candidates,
 )
 from src.features.allocation.slot_plan_diff import (
-    selected_slot_plan_diff,
     single_slot_loadout_state,
 )
 from src.services.allocation_lock_service import (
@@ -49,14 +47,13 @@ from src.services.allocation_lock_service import (
     build_allocation_lock_snapshot,
     filter_allocation_request_for_locks,
     selected_fully_locked_roles,
-    verify_allocation_lock_snapshot,
 )
 from src.services.saved_state_loadout_bridge import (
-    SavedStateLoadoutBridge,
     resolve_character_id_for_allocation_role,
 )
 from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
 from src.storage.sqlite.user_data_dao import UserDataDao
+from src.observability.redaction import format_local_exception
 from src.utils.logger import logger
 
 __all__ = [
@@ -79,6 +76,9 @@ class AllocationRunResult:
     snapshot_id: int
     lock_snapshot: AllocationLockSnapshot
     selected_locked_role_names: frozenset[str]
+    static_database_path: Path
+    static_dataset_id: str
+    static_file_identity: tuple[int, int]
 
 
 def _allocation_paths(window: Any) -> tuple[Path, Path, Path, Path, Path]:
@@ -117,7 +117,7 @@ def _allocation_paths(window: Any) -> tuple[Path, Path, Path, Path, Path]:
         Path(context.paths.config_dir),
         Path(context.account.user_config_dir),
         Path(context.account.screenshot_dir),
-        Path(context.paths.static_database_path),
+        Path(context.paths.equipment_allocation_database_path),
     )
 
 
@@ -134,7 +134,7 @@ def _run_allocation(
     crit_rate_baselines: dict[str, Any] | None = None,
     custom_weapons: dict[str, Any] | None = None,
     filter_settings: AllocationFilterSettings | None = None,
-    blueprint_combo_limit: int = 500,
+    blueprint_combo_limit: int = 2000,
     cancel_check=None,
 ) -> Any:
     try:
@@ -143,6 +143,9 @@ def _run_allocation(
         if not database_path.is_file():
             raise RuntimeError("아직 공식 가방 데이터가 없습니다. 먼저 가방 동기화를 완료하고 안정 스냅샷을 생성하세요.")
         with UserDataDao(database_path) as user_dao, StaticGameDataDao(static_database_path) as static_dao:
+            static_dataset_id = str(static_dao.summary()["dataset"]["dataset_id"])
+            static_stat = static_database_path.stat()
+            static_file_identity = (static_stat.st_size, static_stat.st_mtime_ns)
             snapshot_id = user_dao.current_inventory_snapshot_id()
             if snapshot_id is None:
                 raise RuntimeError("아직 안정 가방 스냅샷이 없습니다. 먼저 홈에서 가방 동기화를 시작하고 게임에 접속하세요.")
@@ -184,13 +187,13 @@ def _run_allocation(
                 f"장비 {len(lock_snapshot.reserved_uids)}개 제외:"
                 f"{'、'.join(sorted(selected_locked_role_names))}"
             )
-        # 求解器只接收本次固定 SQLite 快照的内存投影，不再回退到旧背包 JSON。
         from src.app.facade import NTEAppFacade
 
         a = NTEAppFacade(
             config_dir=str(config_dir),
             user_config_dir=str(user_config_dir),
             user_database_path=database_path,
+            allocation_static_database_path=static_database_path,
         )
         if unlocked_sel:
             if cancel_check is not None and cancel_check():
@@ -205,17 +208,21 @@ def _run_allocation(
             )
         else:
             fp = {}
+        latest_stat = static_database_path.stat()
+        if (latest_stat.st_size, latest_stat.st_mtime_ns) != static_file_identity:
+            raise RuntimeError("계산 도중 정적 데이터셋이 업데이트되었습니다. 계산을 다시 실행하세요.")
         logger.info(f"분배 계산 완료: result_type={type(fp).__name__}")
         return AllocationRunResult(
             plans=fp,
             snapshot_id=projection.snapshot_id,
             lock_snapshot=lock_snapshot,
             selected_locked_role_names=selected_locked_role_names,
+            static_database_path=static_database_path,
+            static_dataset_id=static_dataset_id,
+            static_file_identity=static_file_identity,
         )
     except Exception as e:
-        import traceback as tb
-
-        logger.error(f"_run_allocation 내부 예외: {e}\n{tb.format_exc()}")
+        logger.error(f"allocation.run_failed | {format_local_exception(e)}")
         raise
 
 
@@ -234,7 +241,7 @@ def _start_allocation_worker(self: Any) -> None:
             getattr(self, "_pending_crit_rate_baselines", {}),
             getattr(self, "_pending_custom_weapons", {}),
             getattr(self, "_pending_filter_settings", AllocationFilterSettings()),
-            getattr(self, "_pending_blueprint_combo_limit", 500),
+            getattr(self, "_pending_blueprint_combo_limit", 2000),
             self._cancel_event.is_set,
         ),
         parent=self,
@@ -345,20 +352,6 @@ def _plan_assignment_scores(
     return result
 
 
-def _plan_tape_main_values(plan: dict[str, Any]) -> dict[str, float]:
-    """Freeze the calculated card main value in the saved plan payload."""
-
-    tape = plan.get(PLAN_ASSIGNED_TAPE)
-    if tape is None:
-        return {}
-    uid = str(tape.get(EQUIP_UID, "") if isinstance(tape, dict) else getattr(tape, EQUIP_UID, ""))
-    value = tape.get("main_value") if isinstance(tape, dict) else getattr(tape, "main_value", None)
-    try:
-        return {uid: float(value)} if uid and value is not None else {}
-    except (TypeError, ValueError):
-        return {}
-
-
 def _confirm_unsaved_allocation_before_recompute(self: Any) -> bool:
     if not self.final_plan or not self._allocation_dirty:
         return True
@@ -416,23 +409,29 @@ def _on_done(self: Any, r: Any) -> None:
         )
         if not isinstance(r, AllocationRunResult):
             raise RuntimeError("분배 스레드가 스냅샷에 바인딩되지 않은 결과를 반환했습니다")
+        current_static = _allocation_paths(self)[4]
+        current_stat = current_static.stat()
+        if current_static != r.static_database_path or (
+            current_stat.st_size, current_stat.st_mtime_ns
+        ) != r.static_file_identity:
+            _on_exec_error(self, "계산 도중 정적 데이터셋이 업데이트되었습니다. 계산을 다시 실행하세요.")
+            return
         self.final_plan = r.plans
         self._pending_allocation_snapshot_id = r.snapshot_id
+        self._pending_allocation_static_identity = (
+            r.static_database_path, r.static_dataset_id, r.static_file_identity
+        )
         self._allocation_lock_snapshot = r.lock_snapshot
         self._selected_locked_role_names = r.selected_locked_role_names
         self.btn_run.setEnabled(True)
         self.btn_run.setText("⚡  계산 시작")
         self._allocation_custom_weapons = dict(getattr(self, "_pending_custom_weapons", {}) or {})
-        # The old JSON-state path was removed.  Comparing with the active
-        # SQLite plans restores NEW/CHANGE labels and the per-role diff button.
         self.allocation_plan_diff = _calculation_plan_diff(self, self.final_plan)
         self._allocation_dirty = bool(self.final_plan)
         self._render_results(self.final_plan)
         logger.info("_render_results 완료")
     except Exception as e:
-        import traceback as tb
-
-        logger.error(f"_on_done 예외: {e}\n{tb.format_exc()}")
+        logger.error(f"allocation.render_failed | {format_local_exception(e)}")
         QMessageBox.critical(self.dialog_parent, "렌더링 실패", f"{e}")
 
 
@@ -496,97 +495,8 @@ def _select_allocation_save_slots(
 
 
 def _save_alloc(self: Any, show_message: bool = True) -> bool:
-    if not self.final_plan:
-        return False
-    try:
-        database_path, _, _, _, static_database_path = _allocation_paths(self)
-        snapshot_id = getattr(self, "_pending_allocation_snapshot_id", None)
-        if snapshot_id is None:
-            raise RuntimeError("이번 계산은 공식 가방 스냅샷에 바인딩되지 않았습니다. 계산을 다시 실행하세요.")
-        saved_roles = []
-        with UserDataDao(database_path) as user_dao, StaticGameDataDao(static_database_path) as static_dao:
-            lock_snapshot = getattr(self, "_allocation_lock_snapshot", None)
-            if not isinstance(lock_snapshot, AllocationLockSnapshot):
-                raise RuntimeError("이번 계산에 세팅 잠금 스냅샷이 없습니다. 계산을 다시 실행하세요.")
-            if lock_snapshot.inventory_snapshot_id != snapshot_id:
-                raise RuntimeError("계산 스냅샷과 세팅 잠금 스냅샷이 일치하지 않습니다. 계산을 다시 실행하세요.")
-            verify_allocation_lock_snapshot(user_dao, lock_snapshot)
-            targets = _select_allocation_save_slots(
-                self,
-                user_dao,
-                static_dao,
-                int(snapshot_id),
-            )
-            if targets is None:
-                return False
-            # Selection is made only at save time for multi-slot roles.  Rebuild
-            # the comparison here so slot B never inherits slot A's baseline.
-            selected_slot_diffs = selected_slot_plan_diff(
-                user_dao,
-                self.final_plan,
-                targets,
-            )
-            self.allocation_plan_diff = selected_slot_diffs
-            bridge = SavedStateLoadoutBridge(user_dao, static_dao)
-            for role_name, plan in self.final_plan.items():
-                if not isinstance(plan, dict) or not plan.get(PLAN_VALID):
-                    continue
-                character_id, slot_id = targets[role_name]
-                role_diff = (getattr(self, "allocation_plan_diff", {}) or {}).get(role_name, {})
-                bridge.save_role_plan(
-                    role_name=role_name,
-                    role_state=_role_state_from_plan(plan),
-                    character_id=character_id,
-                    snapshot_id=snapshot_id,
-                    name=f"계산 방안: {role_name}",
-                    score=float(plan.get(PLAN_SCORE, 0.0) or 0.0),
-                    payload={
-                        "schema": "allocation-official-snapshot-v1",
-                        "source": "allocation",
-                        "source_role_name": role_name,
-                        "strategy": getattr(self, "_pending_strat", ""),
-                        "blueprint_combo_limit": int(
-                            getattr(self, "_pending_blueprint_combo_limit", 500)
-                        ),
-                        "last_diff": _persistable_plan_diff(role_diff),
-                        "changed_uids": sorted(_plan_changed_uids(plan, role_diff)),
-                        "assignment_scores": _plan_assignment_scores(
-                            role_name,
-                            plan,
-                        ),
-                        # The card's full-level main stat is part of this
-                        # computed plan, not a value to reconstruct at every
-                        # later presentation pass.
-                        "tape_main_values": _plan_tape_main_values(plan),
-                    },
-                    slot_id=slot_id,
-                )
-                saved_roles.append(role_name)
-        if not saved_roles:
-            raise RuntimeError("이번 계산에는 저장할 수 있는 유효한 방안이 없습니다.")
-        self._allocation_dirty = False
-        # The saved target slot is now known, so update the visible calculation
-        # comparison with the same baseline that was persisted into the plan.
-        self._render_results(self.final_plan)
-        # Active plans are the character-page equipment source.  Refresh both
-        # projections immediately so a saved calculation is visible as the
-        # role's drive/core context without writing any template/profile data.
-        refresh_roles = getattr(self, "_refresh_my_role", None)
-        if callable(refresh_roles):
-            refresh_roles()
-        refresh_equipment = getattr(self, "_refresh_equip", None)
-        if callable(refresh_equipment):
-            refresh_equipment()
-        if show_message:
-            QMessageBox.information(
-                self.dialog_parent,
-                "저장 완료",
-                f"방안 {len(saved_roles)}개를 공식 SQLite 데이터베이스에 저장하고 캐릭터·장비 세팅 페이지에 동기화했습니다.",
-            )
-        return True
-    except Exception as e:
-        QMessageBox.critical(self.dialog_parent, "실패", str(e))
-        return False
+    from src.features.allocation.save_workflow import save_allocation
+    return save_allocation(self, show_message=show_message)
 
 
 def _role_state_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
@@ -655,10 +565,14 @@ class AllocationController(QObject):
         self._cancel_event = threading.Event()
         self.btn_run: QPushButton | None = None
         self._worker: WorkerThread | None = None
+        self._save_worker: WorkerThread | None = None
+        self._saving = False
+        self.btn_save: QPushButton | None = None
         self.final_plan: dict = {}
         self.allocation_plan_diff: dict = {}
         self._allocation_dirty = False
         self._pending_allocation_snapshot_id: int | None = None
+        self._pending_allocation_static_identity: tuple[Path, str, tuple[int, int]] | None = None
         self._allocation_lock_snapshot: AllocationLockSnapshot | None = None
         self._selected_locked_role_names: frozenset[str] = frozenset()
         self._pending_archive_paths: list[Path] = []
@@ -673,12 +587,20 @@ class AllocationController(QObject):
         self._pending_crit_rate_baselines: dict[str, Any] = {}
         self._pending_custom_weapons: dict[str, Any] = {}
         self._pending_filter_settings = AllocationFilterSettings()
-        self._pending_blueprint_combo_limit = 500
+        self._pending_blueprint_combo_limit = 2000
         self._allocation_custom_weapons: dict[str, Any] = {}
         self._ui_preferences: dict[str, Any] = {}
 
     def bind_run_button(self, button: QPushButton) -> None:
         self.btn_run = button
+
+    def bind_save_button(self, button: QPushButton) -> None:
+        self.btn_save = button
+
+    def stop_save(self) -> None:
+        self._cancel_event.set()
+        if self._save_worker is not None and self._save_worker.isRunning():
+            self._save_worker.wait(5000)
 
     def start(
         self,
@@ -694,7 +616,7 @@ class AllocationController(QObject):
         crit_rate_baselines: dict[str, Any],
         custom_weapons: dict[str, Any],
         filter_settings: AllocationFilterSettings,
-        blueprint_combo_limit: int = 500,
+        blueprint_combo_limit: int = 2000,
     ) -> None:
         if self.btn_run is None:
             raise RuntimeError("allocation run button has not been bound")
@@ -730,13 +652,27 @@ class AllocationController(QObject):
         return self._save_alloc(show_message=show_message)
 
     def is_running(self) -> bool:
-        return bool(self._worker is not None and self._worker.isRunning())
+        return self._saving or bool(self._worker is not None and self._worker.isRunning())
+
+    def clear_preview(self) -> None:
+        """Discard a displayed calculation without changing persisted plans or inputs."""
+
+        self.final_plan = {}
+        self.allocation_plan_diff = {}
+        self._allocation_dirty = False
+        self._pending_allocation_snapshot_id = None
+        self._pending_allocation_static_identity = None
+        self._allocation_lock_snapshot = None
+        self._selected_locked_role_names = frozenset()
+        self._allocation_custom_weapons = {}
+        self._equipment_presentation.clear()
 
     def reset_account_state(self) -> None:
         self.final_plan = {}
         self.allocation_plan_diff = {}
         self._allocation_dirty = False
         self._pending_allocation_snapshot_id = None
+        self._pending_allocation_static_identity = None
         self._allocation_lock_snapshot = None
         self._selected_locked_role_names = frozenset()
         self._pending_filter_settings = AllocationFilterSettings()

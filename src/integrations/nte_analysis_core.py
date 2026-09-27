@@ -93,9 +93,20 @@ class NteAnalysisCoreClient:
             self.supports_battle_page
             and capabilities is not None and "battle_progress_v1" in capabilities
         )
+        self.supports_projection_evidence = (
+            capabilities is not None and "interned_buff_projection_v2" in capabilities
+        )
         self.supports_battle_page_identity = (
             self.supports_battle_page
             and capabilities is not None and "battle_page_identity_v1" in capabilities
+        )
+        self.supports_topple_composition = (
+            self.supports_battle_page
+            and capabilities is not None and "battle_topple_composition_v1" in capabilities
+        )
+        self.supports_allocation = (
+            engine_version == ENGINE_VERSION
+            and capabilities is not None and "allocation_v1" in capabilities
         )
         self.timeout = timeout
         self.cancelled = cancelled
@@ -237,6 +248,8 @@ class NteAnalysisCoreClient:
             raise NativeAnalysisError("독립 분석 코어 버전이 일치하지 않습니다")
         if self.supports_projection_plan and "buff_projection_plan_v1" not in value.get("capabilities", []):
             raise NativeAnalysisError("독립 분석 코어에 일괄 후보 투영 기능이 없습니다")
+        if self.supports_projection_evidence and "interned_buff_projection_v2" not in value.get("capabilities", []):
+            raise NativeAnalysisError("독립 분석 코어에 히트별 상태 증거 프로젝션 기능이 없습니다")
         if self.supports_battle_compute and "battle_compute_v1" not in value.get("capabilities", []):
             raise NativeAnalysisError("독립 분석 코어에 확장 전투 리포트 계산 기능이 없습니다")
         if self.supports_battle_progress and "battle_progress_v1" not in value.get("capabilities", []):
@@ -244,6 +257,28 @@ class NteAnalysisCoreClient:
         if self.supports_battle_page_identity and "battle_page_identity_v1" not in value.get("capabilities", []):
             raise NativeAnalysisError("독립 분석 코어에 전투 리포트 입력 식별 기능이 없습니다")
         return value
+
+    def allocate(
+        self, payload: Mapping[str, Any], *,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """Execute one frozen allocation without reading account files."""
+        self._checkpoint(checkpoint)
+        if not self.supports_allocation:
+            raise NativeAnalysisError("분석 컴포넌트에 콘솔 분배 기능이 없습니다. 분석 컴포넌트를 업데이트하세요.")
+        if payload.get("batch_kind") != "allocation_v1":
+            raise NativeAnalysisError("콘솔 분배 요청 유형이 유효하지 않습니다")
+        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False,
+                             separators=(",", ":")).encode("utf-8")
+        if len(encoded) > MAX_BYTES:
+            raise NativeAnalysisError("콘솔 분배 입력이 크기 제한을 초과했습니다")
+        response = _json_object(self._run(encoded, checkpoint=checkpoint))
+        if (response.get("batch_kind") != "allocation_v1"
+                or type(response.get("version")) is not int or response["version"] != 1
+                or not isinstance(response.get("plans"), dict)):
+            raise NativeAnalysisError("콘솔 분배 응답 프로토콜이 일치하지 않습니다")
+        self._checkpoint(checkpoint)
+        return response["plans"]
 
     def compute_batch(
         self, operation: str, inputs: Sequence[dict[str, Any]], *,
@@ -431,9 +466,10 @@ class NteAnalysisCoreClient:
         if not jobs:
             return ()
         started = time.perf_counter()
+        encoding = "interned_v2" if self.supports_projection_evidence else "interned_v1"
         wire = json.dumps({
             **payload, "schema_version": REQUEST_SCHEMA, "dataset_version": self.dataset_version,
-            "batch_kind": batch_kind, "result_encoding": "interned_v1",
+            "batch_kind": batch_kind, "result_encoding": encoding,
         }, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         if len(wire) > MAX_BYTES:
             raise BuffProjectionBatchTooLarge("Buff 투영 요청이 크기 제한을 초과했습니다")
@@ -450,7 +486,7 @@ class NteAnalysisCoreClient:
                 or response.get("dataset_version") != self.dataset_version
                 or response.get("batch_kind") != batch_kind or "error" in response):
             raise NativeAnalysisError("Buff 투영 응답의 버전 또는 데이터셋이 일치하지 않습니다")
-        if response.get("result_encoding") != "interned_v1":
+        if response.get("result_encoding") != encoding:
             raise NativeAnalysisError("Buff 투영 응답 인코딩이 일치하지 않습니다")
         try:
             results = expand_projection_tables(response)
@@ -525,6 +561,10 @@ class NteAnalysisCoreClient:
                     or any(not isinstance(row.get(key), str) for key in ("interval_id", "buff_name"))
                     or not isinstance(row.get("status"), str)
                     or row["status"] not in {"applied", "not_applied", "unresolved"}
+                    or (row.get("observed_stacks") is not None and (
+                        type(row["observed_stacks"]) is not int or row["observed_stacks"] < 0))
+                    or not isinstance(row.get("state_confidence", ""), str)
+                    or row.get("state_confidence", "") not in {"", "未知", "未解析", "低", "中", "高"}
                     or not strings(row, "applied_property_ids") or not strings(row, "reasons")):
                 raise NativeAnalysisError("Buff 투영 응답 채택 상태가 잘못되었습니다")
             if validated_decisions is not None:

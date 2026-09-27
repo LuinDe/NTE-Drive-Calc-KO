@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from src.features.input_operation_entry import request_input_entry, show_input_unavailable
+
 from collections.abc import Callable
 from typing import Any
 
@@ -12,7 +14,6 @@ from PySide6.QtWidgets import QMessageBox, QProgressBar, QProgressDialog
 from src.app.workers import WorkerThread
 from src.observability.context import OperationContext
 from src.integrations.nte_core import is_mods_plugin_unavailable_error
-from src.services.dwmapi_diagnostics import probe_equipment_pipe
 from src.features.inventory.equipment_assembly_dialogs import (
     assembly_report_dialog as _assembly_report_dialog,
 )
@@ -51,32 +52,16 @@ def _is_equipment_plugin_unavailable_error(error: object) -> bool:
 def _equipment_failure_details(
     failure_kind: str,
     error: object,
-    *,
-    pipe_probe: dict[str, Any] | None = None,
 ) -> str:
     """Render one concrete failure category without conflating pipe states."""
 
     message = str(error or "알 수 없는 오류")
     if failure_kind == "plugin_unavailable":
-        probe = pipe_probe if pipe_probe is not None else probe_equipment_pipe()
-        state = str(probe.get("state") or "error")
-        if state == "missing":
-            return (
-                "현재 탐지 결과 장비 플러그인 명명된 파이프가 없습니다."
-                "보통 DLL/스크립트 로드 미완료, Viewport Tick 미실행 또는 IPC 버전 불일치를 뜻합니다."
-            )
-        if state == "busy":
-            return "현재 탐지 결과 명명된 파이프는 있지만 연결 인스턴스가 여전히 사용 중입니다."
-        if state == "available":
-            return (
-                "현재 탐지 결과 명명된 파이프가 있습니다. 이전 요청은 파이프가 잠시 사용 불가였거나 응답 대기 시간 초과였을 가능성이 높으며,"
-                "지속적인 파이프 누락은 아닙니다."
-            )
-        if state == "access_denied":
-            return "현재 탐지 결과 명명된 파이프 접근이 거부되었습니다. 프로그램과 게임의 권한 수준을 확인하세요."
-        return f"장비 플러그인 채널을 사용할 수 없습니다. 현재 파이프 탐지 결과: {probe.get('message') or message}"
+        return f"네이티브 장비 채널을 사용할 수 없습니다: {message}. 작업 모드 검사 상세에서 현재 네이티브 컴포넌트 연결과 장비 기능을 대조하세요."
     if failure_kind == "plugin_busy":
-        return "장비 플러그인 큐가 6회 순차 백오프 후에도 바쁜 상태라 이번 요청은 실행 큐에 들어가지 않았습니다."
+        return "장비 실행이 아직 진행 중이거나 동기화 준비를 기다리는 중이라 이번 요청은 아직 전달되지 않았습니다; 이미 완료된 단계는 롤백되지 않습니다."
+    if failure_kind == "outcome_unknown":
+        return "이번 장비 조작 결과를 알 수 없어 후속 장착을 중지했으며 자동 재전송하지 않았습니다. 가방 동기화를 기다렸다가 게임 장비를 확인한 후 다시 시도하세요."
     if failure_kind == "core_request_timeout":
         return "nte-core 요청 응답 대기가 시간 초과되었습니다. 명명된 파이프 누락 탐지 결과가 아닙니다."
     if failure_kind == "request_rejected":
@@ -126,6 +111,7 @@ def _run_nte_core_equipment_apply(
         sync_service,
         dao_factory=UserDataDao,
         apply_service_factory=EquipmentApplyService,
+        operation_guard=getattr(self, "operation_guard", None),
         operation_context=OperationContext.create(
             "equipment_apply",
             account_id=(
@@ -185,6 +171,12 @@ def _start_nte_core_equipment_apply(
     identity_overrides: dict[str, dict[str, Any]] | None = None,
     job_id: int | None = None,
 ) -> None:
+    if not request_input_entry(self, "native_equipment", "고속 장착"):
+        return
+    sync = getattr(self, "_inventory_sync_service", None)
+    if sync is None or not sync.is_running:
+        show_input_unavailable(self, "고속 장착", "게임 장비 연결이 아직 준비되지 않았습니다. 검사 상세 정보를 확인하세요; 컴포넌트를 배포해야 하면 먼저 게임을 완전히 종료하고, 배포가 완료된 후 다시 시작해 게임 장면에 진입하세요.")
+        return
     current_worker = getattr(self, "_equipment_apply_worker", None)
     if current_worker is not None and current_worker.isRunning():
         QMessageBox.information(self, "장착 중", "이미 장착 작업이 실행 중입니다. 명령 전송이 끝날 때까지 기다리세요.")
@@ -281,9 +273,9 @@ def _start_nte_core_equipment_apply(
                     f"작업 #{report.get('job_id')}이(가) [{report['failed_role']}]에서 중지되었습니다.\n"
                     f"{reason}\n\n"
                     "먼저 확인하세요:\n"
-                    "1. “설정 → 환경 설정”에서 현재 nte-core와 맞는"
-                    "nte-mods-plugin과 equipment.nte를 다시 배포했는지;\n"
-                    "2. 게임 로그인을 유지한 채 홈에서 가방 동기화를 다시 시작하고 “백그라운드 감시”를 기다렸는지;\n"
+                    "1. 먼저 게임을 완전히 종료한 뒤 “설정 → 환경 설정”에서 현재 nte-core와 맞는 구성 요소를 다시 배포하세요: "
+                    "네이티브 수집 컴포넌트;\n"
+                    "2. 배포가 끝나면 게임을 시작해 게임 장면에 진입하고, 작업 공간에서 동기화를 재시작해 “지속 감시”를 기다리세요;\n"
                     "3. 위 확인을 마친 뒤 우상단 “고속 장착”을 클릭해 다시 실행하세요.\n\n"
                     f"이전에 {len(applied)}명을 확인했으며 작업 로그를 저장했습니다. 이번에는 바로 재시도하지 않습니다.",
                 )
@@ -334,11 +326,7 @@ def _start_nte_core_equipment_apply(
 
     def on_error(message: str) -> None:
         close_progress_dialog()
-        QMessageBox.critical(
-            self,
-            "장착 실패",
-            f"로컬 구성 요소가 장착을 완료하지 못했습니다:\n{message}\n\n게임 로그인, 플러그인 로드, 홈의 가방 동기화가 “백그라운드 감시” 상태인지 확인하세요.",
-        )
+        show_input_unavailable(self, "고속 장착", str(message))
 
     worker.result_ready.connect(on_result)
     worker.error.connect(on_error)
@@ -369,6 +357,8 @@ def _preview_nte_core_assemble_role(
     confirmed: bool = False,
 ) -> None:
     """确认后通过装备插件极速装配一个已保存角色方案。"""
+    if not request_input_entry(self, "native_equipment", "고속 장착"):
+        return
 
     try:
         with UserDataDao(_account_database_path(self)) as user_dao:
@@ -430,6 +420,8 @@ def _preview_nte_core_assemble_all_roles(
     confirmed: bool = False,
     role_names: list[str] | None = None,
 ) -> None:
+    if not request_input_entry(self, "native_equipment", "고속 장착"):
+        return
     requested_roles = tuple(dict.fromkeys(str(name) for name in (role_names or ())))
     try:
         with UserDataDao(_account_database_path(self)) as user_dao:
@@ -468,16 +460,15 @@ def _preview_nte_core_assemble_all_roles(
                 elif summary and is_visual_inventory_source(summary.get("source")):
                     visual_roles.append(role_name)
     except Exception as exc:
-        QMessageBox.warning(self, "고속 장착", f"공식 SQLite 방안을 읽을 수 없습니다: {exc}")
+        QMessageBox.warning(self, "고속 장착", f"저장된 방안 읽기 실패: {exc}")
         return
     if nte_slot_ids:
         selected_slot_ids = list(nte_slot_ids)
     elif visual_roles:
         if _confirm_automatic_assembly_fallback(
             self,
-            "현재 저장된 방안은 비전 스캔 스냅샷에서 왔으며, 장비 UID는 비전 스캔이 생성한 임시 식별자입니다."
-            "고속 장착은 패킷 캡처 동기화(nte_core)가 제공하는 게임 원본 UID만 기록할 수 있습니다.\n\n"
-            "잘못된 장비 기록을 피하려면 단계별 자동 장착을 사용할 수 있습니다. 고속 장착을 사용하려면 가방 동기화를 한 번 완료한 뒤"
+            "현재 방안은 시각 스캔으로 만들어져, 고속 장착에 필요한 게임 장비 식별자를 얻을 수 없습니다.\n\n"
+            "단계별 자동 장착을 사용하세요. 고속 장착을 사용하려면 먼저 네이티브 가방 동기화를 한 번 완료하고,"
             "방안을 다시 계산하고 저장하세요.",
         ):
             _preview_automatic_assemble_all_roles(
@@ -486,7 +477,7 @@ def _preview_nte_core_assemble_all_roles(
             )
         return
     else:
-        QMessageBox.information(self, "고속 장착", "현재 공식 가방 스냅샷에서 온 저장된 방안이 없습니다. 먼저 다시 계산하고 저장하세요.")
+        QMessageBox.information(self, "고속 장착", "현재 네이티브 동기화 가방 기반의 저장된 방안이 없습니다. 먼저 다시 계산하고 저장해 주세요.")
         return
     if confirmed:
         _start_nte_core_equipment_apply(self, [], slot_ids=selected_slot_ids)

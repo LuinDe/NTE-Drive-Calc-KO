@@ -30,7 +30,7 @@ class AllocationFilterSettings:
 
     qualities: frozenset[str] = frozenset()
     item_types: frozenset[str] = frozenset()
-    blueprint_combo_limit: int = 500
+    blueprint_combo_limit: int = 2000
 
     def validate(self) -> None:
         unknown_qualities = self.qualities.difference(ALLOCATION_QUALITIES)
@@ -63,7 +63,7 @@ class AllocationFilterSettings:
         raw = value or {}
         qualities = raw.get("qualities", ())
         item_types = raw.get("item_types", ())
-        combo_limit = raw.get("blueprint_combo_limit", 500)
+        combo_limit = raw.get("blueprint_combo_limit", 2000)
         if not isinstance(qualities, (list, tuple, set, frozenset)):
             raise AllocationFilterValidationError("분배 품질 설정은 목록이어야 합니다.")
         if not isinstance(item_types, (list, tuple, set, frozenset)):

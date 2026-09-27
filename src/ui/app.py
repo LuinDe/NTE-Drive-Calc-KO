@@ -1,7 +1,7 @@
 # PySide6 主窗口入口和功能模块挂载。
 """NTE Drive Calc - PySide6 Desktop Application"""
 
-import sys, os, threading, ctypes
+import sys, os, ctypes
 from pathlib import Path
 from typing import Optional
 
@@ -29,10 +29,6 @@ from src.app.constants import (
     ACCOUNT_USER_FILES,
     APP_VERSION,
     CORE_CONFIG_FILES,
-)
-from src.app.theme import (
-    apply_app_theme,
-    install_dialog_defaults,
 )
 
 _BUNDLED_CONFIG_DIR = _PACKAGE_ROOT / "config"
@@ -106,11 +102,16 @@ from src.features.settings.page import refresh_account_scoped_settings
 from src.integrations.global_hotkeys import GlobalHotkeyManager
 from src.services.global_theme_settings_service import GlobalThemeSettingsService
 from src.services.mod_plugin_loading_service import ModPluginLoadingService
+from src.ui.work_mode_composition import (
+    initialize_mode_policy, initialize_mode_runtime, migrate_legacy_component_facts, initialize_character_profile_sync,
+)
 from src.ui.main_window_mixins import FeatureMainWindowMixin
 from src.ui.equipment_presentation import EquipmentPresentation
 from src.features.blueprints.page import BlueprintPage
 from src.features.toolbox.page import ToolboxDependencies, ToolboxPage
+from src.features.toolbox.toolbox_navigation import cultivation_context_identity
 from src.services.cultivation_planner_service import CultivationPlannerService
+from src.services.cultivation_owned_material_import import CultivationOwnedMaterialImportService
 from src.features.static_catalog.controller import StaticCatalogController
 from src.features.static_catalog.dependencies import (
     build_static_catalog_domain_pages,
@@ -148,7 +149,7 @@ from src.features.inventory.warehouse import configure_warehouse_view_template_r
 configure_warehouse_view_template_roots(
     APP_CONTEXT.paths.template_dir,
     APP_CONTEXT.paths.bundled_config_dir / "templates",
-    asset_root=APP_CONTEXT.paths.asset_dir,
+    asset_root=APP_CONTEXT.paths.game_ui_asset_root,
 )
 
 
@@ -187,6 +188,7 @@ try:
     _install_i18n_display()
 except Exception as _i18n_exc:  # pragma: no cover - display layer is optional
     print(f"[i18n_display] install failed: {_i18n_exc}")
+
 
 # ── Main Window
 from src.ui.main_window_data_mixin import MainWindowDataMixin
@@ -230,6 +232,7 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         self._shape_areas: dict = {}
         self.scoring_engine = None
         self._inventory_sync_service = None
+        initialize_mode_policy(self)
         self._application_log_context = OperationContext.create(
             "application",
         )
@@ -241,7 +244,7 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             is_running=lambda: bool(self._inventory_sync_service and self._inventory_sync_service.is_running),
             stop=self._stop_inventory_sync,
             rebuild=lambda _account: None,
-            start=self._start_inventory_sync,
+            start=lambda: self.auto_sync_controller.refresh(),
         )
         self._unregister_inventory_sync_lifecycle = self.app_context.register_account_lifecycle(
             self._inventory_sync_lifecycle,
@@ -269,8 +272,10 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         self._account_settings.remove_legacy_theme_preference()
         self._global_theme_settings = GLOBAL_THEME_SETTINGS
         self._mod_plugin_loading_service = ModPluginLoadingService(
-            application_root=self.app_context.paths.root
+            application_root=self.app_context.paths.root, operation_guard=self.operation_guard,
+            native_workspace_path=self.app_context.paths.config_dir / "native-loader",
         )
+        initialize_mode_runtime(self)
         self._theme_preference = self._load_theme_preference(legacy_theme)
         self._load_hotkey_config()
         self.global_hotkey_manager = GlobalHotkeyManager(
@@ -279,11 +284,16 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             stop_hotkey=self._hk_stop,
             battle_rerecord_hotkey=self._hk_battle_rerecord,
         )
+        initialize_character_profile_sync(self)
         self.equipment_presentation = EquipmentPresentation(
             app_context=self.app_context,
             dialog_parent=self,
         )
         self.scanning_controller = ScanningController(
+            operation_entry=self.operation_entry,
+            operation_unavailable=self.operation_unavailable,
+            operation_guard=self.operation_guard,
+            operation_generation=self.operation_generation,
             app_context=self.app_context,
             dialog_parent=self,
             minimize_window=self.showMinimized,
@@ -300,6 +310,8 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             hotkey_manager=self.global_hotkey_manager,
         )
         self.identification_controller = IdentificationController(
+            operation_entry=self.operation_entry,
+            operation_unavailable=self.operation_unavailable,
             app_context=self.app_context,
             dialog_parent=self,
             card_factory=self._card,
@@ -310,6 +322,8 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             activate_window=self.activateWindow,
         )
         self.battle_report_controller = build_battle_report_controller(
+            operation_entry=self.operation_entry,
+            operation_unavailable=self.operation_unavailable,
             app_context=self.app_context,
             dialog_parent=self,
             inventory_sync_is_running=lambda: bool(
@@ -317,8 +331,9 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
                 and self._inventory_sync_service.is_running
             ),
             stop_inventory_sync=self._stop_inventory_sync,
-            start_inventory_sync=self._start_inventory_sync,
+            start_inventory_sync=lambda: self._start_inventory_sync(automatic=True),
             hotkey_manager=self.global_hotkey_manager,
+            work_mode_service=self.work_mode_service, native_session=self.native_game_session,
         )
         self.blueprint_page = BlueprintPage(
             app_context=self.app_context,
@@ -326,14 +341,30 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         )
         self.toolbox_page = ToolboxPage(
             dependencies=ToolboxDependencies(
+                operation_entry=self.operation_entry,
+                operation_unavailable=self.operation_unavailable,
+                operation_guard=self.operation_guard,
+                operation_generation=self.operation_generation,
                 rewind_service_factory=lambda: RewindShapeRecommendationService(
                     user_database_path=self.app_context.account.user_database_path,
-                    static_database_path=self.app_context.paths.static_database_path,
+                    static_database_path=self.app_context.paths.equipment_allocation_database_path,
+                    asset_root=self.app_context.paths.equipment_allocation_asset_root,
                 ),
                 cultivation_service_factory=lambda: CultivationPlannerService(
                     user_database_path=self.app_context.account.user_database_path,
-                    static_database_path=self.app_context.paths.static_database_path,
+                    static_database_path=self.app_context.paths.cultivation_database_path,
                 ),
+                cultivation_material_importer=lambda: CultivationOwnedMaterialImportService(
+                    user_database_path=self.app_context.account.user_database_path,
+                    static_database_path=self.app_context.paths.cultivation_database_path,
+                    account_id=self.app_context.account.active_account_id,
+                ).load_latest(),
+                cultivation_context_identity=lambda: cultivation_context_identity(
+                    self.app_context.account.active_account_id,
+                    self.app_context.generation,
+                    self.app_context.paths.cultivation_database_path,
+                ),
+                cultivation_asset_root=lambda: self.app_context.paths.cultivation_asset_root,
                 navigate_static_catalog=lambda: self._go("static_catalog"),
             ),
             dialog_parent=self,
@@ -342,7 +373,12 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             StaticCatalogService(
                 static_database_path=self.app_context.paths.static_database_path,
                 providers=build_static_catalog_providers(
-                    self.app_context.paths.static_database_path
+                    self.app_context.paths.static_database_path,
+                    role_catalog=self.app_context.paths.role_catalog,
+                ),
+                domain_database_paths=(
+                    {key: self.app_context.paths.role_catalog.database_path for key in self.app_context.paths.role_catalog.catalog_domains}
+                    if self.app_context.paths.role_catalog else None
                 ),
             )
         )
@@ -350,8 +386,9 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         try:
             static_catalog_domains = build_static_catalog_domain_pages(
                 self.app_context.paths.static_database_path,
-                self.app_context.paths.asset_dir / "game_ui",
+                self.app_context.paths.game_ui_asset_root,
                 equipment_presentation=self.equipment_presentation,
+                role_catalog=self.app_context.paths.role_catalog,
                 equipment_inventory_loader=self._load_static_catalog_inventory,
                 open_catalog_link=lambda link: (
                     self.static_catalog_page.open_catalog_link(link)
@@ -360,7 +397,7 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             self.static_catalog_page = StaticCatalogPage(
                 controller=static_catalog_controller,
                 dialog_parent=self,
-                game_ui_asset_root=self.app_context.paths.asset_dir / "game_ui",
+                game_ui_asset_root=self.app_context.paths.game_ui_asset_root,
                 domain_pages=static_catalog_domains,
             )
         except Exception:
@@ -377,9 +414,11 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         self.onboarding_guide = OnboardingGuide(
             app_context=self.app_context,
             parent=self,
+            on_help=self._show_group_chat_notice,
         )
         self._update_config = self._load_update_config()
         self._ui_preferences = self._load_ui_preferences()
+        migrate_legacy_component_facts(self)
         self._apply_theme_preference()
         self._update_check_manual = True
 
@@ -405,11 +444,14 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         self._workshop_weight_refresh_thread = None
         QTimer.singleShot(1500, lambda: setattr(
             self, "_workshop_weight_refresh_thread", start_workshop_weight_template_refresh(
-                self.app_context.paths.workshop_weight_template_file, self.app_context.paths.static_database_path)))
+                self.app_context.paths.workshop_weight_template_file,
+                self.app_context.paths.equipment_allocation_database_path)))
         self._refresh_home()
-        self._maybe_auto_start_inventory_sync()
+        self.auto_sync_controller.start()
+        self.work_mode_controller.start()
         self._on_log("시스템 준비 완료")
         self.onboarding_guide.maybe_show()
+        self.work_mode_controller.start_upgrade_guidance()
         self._maybe_check_updates_on_startup()
 
     def _load_static_catalog_inventory(self):
@@ -501,6 +543,9 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
                 self.scanning_controller.role_selector.save_temporary_priority_config()
             except Exception as exc:
                 logger.warning(f"임시 우선순위 저장 실패: {exc}")
+        self.character_profile_sync_controller.close()
+        self.auto_sync_controller.close()
+        self.work_mode_controller.close()
         try:
             self.battle_report_controller.close()
         except Exception as exc:
@@ -523,6 +568,7 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             logger.warning(f"게임 자료실 닫기 실패: {exc}")
         self.global_hotkey_manager.close()
         self._unregister_inventory_sync_lifecycle()
+        self._unregister_character_profile_sync()
         self._account_context_unsubscribe()
         log_event(
             "INFO",
@@ -700,6 +746,7 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             )
         self._log_enabled = False
         set_log_dir(event.current.log_dir, reopen_session=False)
+        self.native_game_session.close()
         self._account_settings = self.app_context.account_settings
         self._account_settings.migrate_legacy_settings()
         self._account_settings.remove_legacy_theme_preference()
@@ -752,55 +799,9 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             self._refresh_account_combo,
         )
 
-# ── Entry
-def _global_exception_handler(exc_type, exc_value, exc_tb):
-    """全局异常处理，防止未捕获异常导致闪退"""
-    import traceback as tb
-
-    error_msg = "".join(tb.format_exception(exc_type, exc_value, exc_tb))
-    logger.error(f"처리되지 않은 예외:\n{error_msg}")
-    try:
-        from PySide6.QtWidgets import QMessageBox
-
-        QMessageBox.critical(None, "프로그램 예외", f"처리되지 않은 예외가 발생했습니다:\n\n{error_msg[:1000]}")
-    except Exception as exc:
-        logger.error(f"전역 예외 팝업 표시 실패: {exc}")
-
-
 def run_gui():
-    import faulthandler
-
-    _ensure_admin()
-    APP_CONTEXT.account.log_dir.mkdir(parents=True, exist_ok=True)
-    _fault_log = open(
-        str(APP_CONTEXT.account.log_dir / "crash_dump.log"),
-        "w",
-        encoding="utf-8",
-    )
-    faulthandler.enable(file=_fault_log)
-
-    sys.excepthook = _global_exception_handler
-    threading.excepthook = lambda args: logger.error(
-        f"스레드 예외 [{args.thread}]: {args.exc_type.__name__}: {args.exc_value}"
-    )
-    if hasattr(Qt, "AA_DontUseNativeDialogs"):
-        QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, True)
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    account_settings = APP_CONTEXT.account_settings
-    legacy_theme = account_settings.legacy_theme_preference()
-    account_settings.migrate_legacy_settings()
-    account_settings.remove_legacy_theme_preference()
-    apply_app_theme(
-        app,
-        GLOBAL_THEME_SETTINGS.load(legacy_theme=legacy_theme),
-    )
-    install_dialog_defaults(app)
-    if APP_CONTEXT.paths.app_icon_path.exists():
-        app.setWindowIcon(QIcon(str(APP_CONTEXT.paths.app_icon_path)))
-    w = MainWindow()
-    w.show()
-    sys.exit(app.exec())
+    from src.ui.gui_startup import run_gui as start_gui
+    start_gui(APP_CONTEXT, GLOBAL_THEME_SETTINGS, MainWindow, _ensure_admin)
 
 
 if __name__ == "__main__":

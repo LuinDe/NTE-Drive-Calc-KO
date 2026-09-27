@@ -24,23 +24,23 @@ from src.domain.battle_report import (
     BattleCaptureState,
     BattleSummary,
 )
+from src.domain.battle_capture_comparison import BattleCaptureComparisonState
+from src.features.battle_report.comparison_panel import BattleCaptureComparisonPanel
 from src.features.battle_report.analysis_view import BattleLongAnalysisView
 from src.features.battle_report.analysis_progress_bar import (
     BattleAnalysisProgressBar,
 )
 from src.services.battle_analysis_progress import BattleAnalysisProgress
 from src.features.battle_report.marginal_page import BattleMarginalPage
+from src.features.battle_report.summary_clock import summary_clock_label
 from src.services.battle_buff_counterfactual_service import (
     BUFF_COUNTERFACTUAL_MODEL_VERSION,
 )
 from src.services.battle_passive_counterfactual_service import (
     PASSIVE_COUNTERFACTUAL_MODEL_VERSION,
 )
-from src.services.battle_timeline_time_service import (
-    ACTIVE_TIME_MODE,
-    projected_range_duration_us,
-    time_stop_overlap_us,
-)
+from src.services.battle_report_metrics import project_report_metrics
+
 from src.ui.dashboard_widgets import metric_card, set_status_badge
 
 
@@ -87,6 +87,7 @@ class BattleReportPage(QWidget):
     def __init__(self, *, game_ui_asset_root, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._latest_summary: BattleSummary | None = None
+        self._summary_record_id: int | None = None
         self._source_analysis = None
         self._marginal_result_scope: str | None = None
         self._marginal_result_is_candidate = False
@@ -96,27 +97,12 @@ class BattleReportPage(QWidget):
         ] = {}
         self._detail_scope = "current"
         self._capture_running = False
+        self._capture_busy = False
+        self._comparison_running = False
         self._stack = QStackedWidget(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        model_notice = QLabel(
-            "중요 안내: 전투 리포트 반사실 계산 모델은 아직 모든 게임 메커니즘을 완전히 다루지 못하므로,"
-            "현재 표시되는 각 이득 결과는 참고용입니다. 계산 결과가 실제 메커니즘과 명백히 다르다면"
-            "관련 전투 리포트와 문제 설명을 1412582379@qq.com 으로 보내 주세요."
-            "이를 바탕으로 검증하고 모델을 지속적으로 개선하겠습니다.",
-            self,
-        )
-        model_notice.setObjectName("battleCounterfactualNotice")
-        model_notice.setWordWrap(True)
-        model_notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        model_notice.setStyleSheet(themed_style(
-            "QLabel#battleCounterfactualNotice{"
-            "color:#f85149;background:#f8514922;"
-            "border-bottom:1px solid #f85149;"
-            "padding:8px 18px;font-size:12px;font-weight:600;}"
-        ))
-        layout.addWidget(model_notice)
         layout.addWidget(self._stack, 1)
         self.analysis_progress = BattleAnalysisProgressBar(self)
         layout.addWidget(self.analysis_progress)
@@ -150,7 +136,7 @@ class BattleReportPage(QWidget):
         status_row.addWidget(self.status_badge)
         status_row.addWidget(self.status_detail, 1)
         help_text = (
-            "nte-core로 전투를 수집합니다. 수집 중에는 가방 동기화가 일시 중지되며 종료 후 자동으로 재개됩니다."
+            "게임 내 구성 요소로 전투를 수집합니다. 수집 중에는 가방 동기화가 일시 중지되며 종료 후 자동으로 재개됩니다."
             "오버레이는 현재 수집 세션에서만 표시됩니다."
         )
         help_button = QPushButton("?")
@@ -202,19 +188,27 @@ class BattleReportPage(QWidget):
         actions.addWidget(self.rerecord_button)
         actions.addStretch()
         control_layout.addLayout(actions)
+        self.comparison_toggle = QCheckBox("동시 패킷 캡처 대조")
+        self.comparison_toggle.setChecked(False)
+        self.comparison_toggle.setToolTip("DLL이 준비되면 패킷 캡처를 동시에 실행해 각자 전투 리포트를 저장합니다; 이번 페어링 결과만 대조합니다.")
+        control_layout.addWidget(self.comparison_toggle)
         root.addWidget(control_card)
+        self.comparison_panel = BattleCaptureComparisonPanel(content)
+        root.addWidget(self.comparison_panel)
 
         metrics = QGridLayout()
         definitions = (
-            ("dps", "팀 DPS", "정지 시간 제외"),
+            ("dps", "팀 DPS", "타이밍 데이터 대기 중"),
             ("damage", "총 피해", "전체 전투 리포트"),
-            ("duration", "전투 시간", "정지 시간 제외 (괄호 안은 실제 시간)"),
+            ("duration", "전투 시간", "타이밍 데이터 대기 중"),
             ("taken", "받은 피해", "팀 전체"),
         )
         self.metric_labels: dict[str, QLabel] = {}
+        self.metric_subtitles: dict[str, QLabel] = {}
         for column, (key, title, subtitle) in enumerate(definitions):
             card, value, _sub = metric_card(title, "—", subtitle)
             self.metric_labels[key] = value
+            self.metric_subtitles[key] = _sub
             metrics.addWidget(card, 0, column)
         root.addLayout(metrics)
 
@@ -368,6 +362,11 @@ class BattleReportPage(QWidget):
         self.marginal_baseline_requested.emit()
 
     def update_state(self, state: BattleCaptureState) -> None:
+        if state.battle_record_id != self._summary_record_id:
+            self._source_analysis = None
+            self._summary_record_id = state.battle_record_id
+        if state.phase == "history":
+            self.set_capture_comparison(None)
         tones = {
             "starting": ("시작 중", "active"),
             "running": ("수집 중", "success"),
@@ -382,6 +381,10 @@ class BattleReportPage(QWidget):
             state.message if not state.error else f"{state.message}: {state.error}"
         )
         self._capture_running = state.running
+        self._capture_busy = state.running or state.phase in {"starting", "stopping"}
+        self.comparison_toggle.setEnabled(
+            not self._capture_busy and not self._comparison_running
+        )
         stopping = state.phase == "stopping"
         self.capture_button.setText("종료 후 저장" if state.running else "수집 시작")
         object_name = "btnDanger" if state.running else "btnPrimary"
@@ -442,80 +445,45 @@ class BattleReportPage(QWidget):
         return self.long_analysis_view.detail_scope()
 
     def clear_summary(self) -> None:
+        self.set_capture_comparison(None)
         self.marginal_page.clear_candidate()
         self._source_analysis = None
         self._marginal_result_scope = None
         self._marginal_result_is_candidate = False
         self._marginal_baseline_by_scope.clear()
         self._latest_summary = None
+        self._summary_record_id = None
         self._detail_scope = "current"
         for label in self.metric_labels.values():
             label.setText("—")
         self.long_analysis_view.clear()
 
+    def set_capture_comparison(self, snapshot: BattleCaptureComparisonState | None) -> None:
+        self._comparison_running = snapshot is not None and not snapshot.finished
+        self.comparison_panel.set_snapshot(snapshot)
+        self.comparison_toggle.setEnabled(not self._capture_busy and not self._comparison_running)
+
     def set_analysis(self, analysis, *, selected_character_id=None, hit_details=None) -> None:
         self._source_analysis = analysis
         self._marginal_baseline_by_scope.clear()
         if self._latest_summary is not None:
-            raw_damage = max(0.0, float(self._latest_summary.total_damage))
-            overkill_correction = (
-                analysis.timeline_damage_correction_total
-                if analysis.axis_complete
-                else 0.0
-            )
-            max_hp_settlement = (
-                sum(
-                    max(0.0, float(event.effective_hp_loss))
-                    for event in getattr(analysis, "timeline_max_hp_events", ())
-                    if getattr(event, "included_in_effective_damage", True)
-                )
-            )
-            corrected_damage = max(
-                0.0,
-                raw_damage
-                - overkill_correction
-                + max_hp_settlement,
-            )
-            battle_start_us = int(getattr(analysis, "battle_start_us", 0))
-            intervals = tuple(getattr(analysis, "time_stop_intervals", ()))
-            summary_duration_us = round(
-                self._latest_summary.duration_seconds * 1_000_000
-            )
-            if (
-                getattr(analysis, "time_stop_source_kind", "") == "nte_core"
-                and getattr(
-                    self._latest_summary,
-                    "dps_time_mode",
-                    "subtract_time_stop",
-                )
-                == "subtract_time_stop"
-            ):
-                interval_end_us = max(
-                    (end_us or battle_start_us for _start_us, end_us in intervals),
-                    default=battle_start_us,
-                )
-                summary_duration_us += time_stop_overlap_us(
-                    battle_start_us,
-                    max(int(analysis.battle_end_us), interval_end_us),
-                    intervals,
-                )
-            raw_duration_us = max(
-                summary_duration_us,
-                int(analysis.battle_end_us) - battle_start_us,
-            )
-            active_duration_us = projected_range_duration_us(
-                battle_start_us,
-                battle_start_us + raw_duration_us,
-                intervals=intervals,
-                mode=ACTIVE_TIME_MODE,
-            )
-            duration = max(0.001, active_duration_us / 1_000_000.0)
-            real_duration = raw_duration_us / 1_000_000.0
-            self.metric_labels["damage"].setText(_format_number(corrected_damage))
-            self.metric_labels["dps"].setText(_format_number(corrected_damage / duration))
+            metrics = project_report_metrics(self._latest_summary, analysis)
+            for key, value in (("damage", metrics.damage), ("dps", metrics.dps),
+                               ("taken", metrics.damage_taken)):
+                if key in self.metric_labels:
+                    self.metric_labels[key].setText("—" if value is None else _format_number(value))
             self.metric_labels["duration"].setText(
-                f"{duration:.1f}s ({real_duration:.1f}s)"
+                f"{metrics.duration:.1f}s（{metrics.real_duration:.1f}s）"
             )
+            subtitles = getattr(self, "metric_subtitles", {})
+            if subtitles:
+                subtitles["dps"].setText("실제 시간(시간 정지 증거 불완전)" if metrics.partial_clock else "유효 시간")
+                subtitles["duration"].setText("시간 정지 커버리지가 불완전하여 시간 정지를 차감하지 않음" if metrics.partial_clock else "정지 시간 제외 (괄호 안은 실제 시간)")
+                for key in ("damage", "taken"):
+                    if key in subtitles:
+                        subtitles[key].setText("현재 범위의 기록된 값 (커버리지 불완전)" if metrics.incomplete_scope else "현재 분석 범위")
+                if metrics.incomplete_scope:
+                    subtitles["dps"].setText("기록된 피해 / " + ("실제 시간" if metrics.partial_clock else "유효 시간"))
         self.long_analysis_view.set_analysis(
             analysis,
             selected_character_id=selected_character_id,
@@ -593,7 +561,13 @@ class BattleReportPage(QWidget):
         return self.marginal_page.disabled_inferred_fact_ids()
 
     def clear_analysis(self, message: str) -> None:
+        self._source_analysis = None
+        for label in self.metric_labels.values():
+            label.setText("—")
         self.long_analysis_view.clear(message)
+
+    def show_analysis_detail_error(self, message: str) -> None:
+        self.long_analysis_view.set_loading(message)
 
     def set_build_edit_state(
         self,
@@ -610,11 +584,19 @@ class BattleReportPage(QWidget):
         self.long_analysis_view.audit_buttons["marginal"].setEnabled(available)
 
     def _render_summary(self, summary: BattleSummary) -> None:
+        if summary != self._latest_summary:
+            self._source_analysis = None
         self._latest_summary = summary
-        self.metric_labels["dps"].setText(_format_number(summary.total_dps))
-        self.metric_labels["damage"].setText(_format_number(summary.total_damage))
-        self.metric_labels["duration"].setText(f"{summary.duration_seconds:.1f}s")
-        self.metric_labels["taken"].setText(_format_number(summary.total_damage_taken))
+        # Retention/status notifications carry the same frozen summary. They must
+        # not replace this record's completed analysis with its raw clock again.
+        if self._source_analysis is None:
+            self.metric_labels["dps"].setText(_format_number(summary.total_dps))
+            self.metric_labels["damage"].setText(_format_number(summary.total_damage))
+            self.metric_labels["duration"].setText(f"{summary.duration_seconds:.1f}s")
+            clock = summary_clock_label(summary.dps_time_mode)
+            self.metric_subtitles["dps"].setText(clock)
+            self.metric_subtitles["duration"].setText(clock)
+            self.metric_labels["taken"].setText(_format_number(summary.total_damage_taken))
         self.set_detail_scope(self._detail_scope)
         quality = summary.quality
         self.quality_label.setText(
@@ -623,4 +605,6 @@ class BattleReportPage(QWidget):
 
     def _select_detail_scope(self, mode: str) -> None:
         self._detail_scope = mode
+        for label in self.metric_labels.values():
+            label.setText("—")
         self.detail_scope_changed.emit(mode)

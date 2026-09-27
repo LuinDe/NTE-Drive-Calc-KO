@@ -23,7 +23,7 @@ class DispatcherEngine:
         *,
         core_set_targets: dict[str, str | None] | None = None,
         stat_catalog: StatCatalog | None = None,
-        blueprint_combo_limit: int = 500,
+        blueprint_combo_limit: int = 2000,
         cancel_check=None,
     ):
         strategy = RolePriorityStrategy(

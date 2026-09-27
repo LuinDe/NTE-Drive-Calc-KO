@@ -95,11 +95,22 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 logger.remove()
 
+
+def _sanitize_local_record(record: dict) -> bool:
+    """Protect local sinks from credentials without hiding diagnostic paths."""
+
+    # Import lazily: observability's public package also imports this logger.
+    from src.observability.redaction import sanitize_local_log_text
+
+    record["message"] = sanitize_local_log_text(record["message"])
+    return True
+
 logger.add(
     sys.stderr,
     format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>",
     level=CONSOLE_LOG_LEVEL,
     colorize=not TEST_PROCESS,
+    filter=_sanitize_local_record,
 )
 
 _LOG_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{line} | {message}"
@@ -113,6 +124,7 @@ def _add_runtime_sink(log_dir: Path) -> int:
         rotation="5 MB",
         retention="7 days",
         encoding="utf-8",
+        filter=_sanitize_local_record,
     )
 
 
@@ -133,6 +145,7 @@ def _add_session_sink(log_dir: Path) -> tuple[int, Path]:
         format=_LOG_FORMAT,
         level="DEBUG",
         encoding="utf-8",
+        filter=_sanitize_local_record,
     )
     return sink_id, path
 

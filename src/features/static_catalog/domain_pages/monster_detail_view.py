@@ -112,7 +112,7 @@ class MonsterDetailView(QWidget):
         )
         self.body.addWidget(self._hero(detail, icon, context))
         profile_sections = tuple(
-            section for section in detail.sections if "画像" in section.title
+            section for section in detail.sections if "프로필" in section.title
         )
         if profile_sections:
             self.body.addWidget(section_title("전투 프로필", "HP, 방어, 브레이크, 저항"))
@@ -189,14 +189,14 @@ class MonsterDetailView(QWidget):
             value for value in (options.values if options else ())
             if "경로" not in value.label and "리소스" not in value.label
         )
-        if not values:
+        if options is None or (not values and not options.note):
             return
         heading = {
-            "魔女赐福": "战前赐福选择",
-            "轨外赛季 Buff": "本期赛季规则",
+            "마녀의 축복": "战前赐福选择",
+            "궤외 시즌 Buff": "本期赛季规则",
         }.get(options.title, "场景增益 / 限制")
         self.body.addWidget(section_title(
-            heading, f"규칙 {len(values)}개, 효과 설명은 현재 페이지에서 바로 펼쳐집니다",
+            heading, f"규칙 {len(values)}개, 효과 설명은 현재 페이지에서 바로 펼쳐집니다" if values else "정식 효과 설명",
         ))
         if options.note:
             description = QLabel(options.note, self.host)
@@ -206,6 +206,8 @@ class MonsterDetailView(QWidget):
                 "border-radius:10px;padding:9px;font-size:10px"
             ))
             self.body.addWidget(description)
+        if not values:
+            return
         preview = QWidget(self.host)
         preview_grid = QGridLayout(preview)
         preview_grid.setContentsMargins(0, 0, 0, 0)
@@ -236,7 +238,7 @@ class MonsterDetailView(QWidget):
 
     def _add_drop_projection(self, detail: CatalogDetail) -> None:
         drops = next(
-            (section for section in detail.sections if section.title == "正式掉落"),
+            (section for section in detail.sections if section.title == "정식 드롭"),
             None,
         )
         if drops is None:
@@ -283,7 +285,7 @@ class MonsterDetailView(QWidget):
         values = [
             value
             for section in detail.sections
-            if "画像" not in section.title and section.title != "来源追溯"
+            if "프로필" not in section.title and section.title != "출처 추적"
             for value in section.values
             if value.label in _SUMMARY_FIELDS
         ]
@@ -362,7 +364,7 @@ class MonsterDetailView(QWidget):
             ("生命", _join_profile(values, "HP 기본", "HP 보너스", "HP 고정값"), "#39d0d8"),
             ("防御", _join_profile(values, "방어 기본", "방어 보너스", "방어 고정값", "방어 무시"), "#58a6ff"),
             ("倾陷", _join_profile(values, "브레이크 상한", "브레이크 회복"), "#e3b341"),
-            ("等级 / 难度", _value_text(values.get("怪物等级")), "#a371f7"),
+            ("等级 / 难度", _value_text(values.get("몬스터 레벨")), "#a371f7"),
         )
         grid = QGridLayout()
         for index, (label, value, accent) in enumerate(stats):
@@ -442,12 +444,12 @@ def _display_title(detail: CatalogDetail, context: MonsterContext | None) -> str
 
 
 def _profile_title(title: str) -> str:
-    return title.replace("等价公式", "").replace("公式", "").strip(" ·") or "战斗画像"
+    return title.replace("等价公式", "").replace("公式", "").strip(" ·") or "전투 프로필"
 
 
 def _profile_level(section: CatalogSection) -> float:
     value = next(
-        (item for item in section.values if item.label == "怪物等级"),
+        (item for item in section.values if item.label == "몬스터 레벨"),
         None,
     )
     try:
@@ -460,7 +462,7 @@ def _profile_kind(section: CatalogSection) -> str:
     return next(
         (
             value.value for value in section.values
-            if value.label == "画像档位类型"
+            if value.label == "프로필 티어 유형"
         ),
         "",
     )

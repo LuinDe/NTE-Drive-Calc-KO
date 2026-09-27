@@ -26,10 +26,11 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
 )
 
+from src.features.settings.work_mode_card import build_work_mode_card
 from src.app.constants import NETDISK_DOWNLOAD_LINKS
 from src.app.context import AppContext
 from src.app.theme import THEME_LABELS, themed_style
-from src.ui.widgets import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
+from src.ui.widgets import NoWheelComboBox
 
 
 def _normalize_netdisk_links(netdisk_links=None):
@@ -66,14 +67,14 @@ def refresh_account_scoped_settings(window) -> None:
     if game_edit is not None:
         game_edit.blockSignals(True)
         game_edit.setText(
-            str(preferences.get("equipment_plugin_game_executable") or "")
+            window.work_mode_service.settings.game_executable
         )
         game_edit.blockSignals(False)
     method_combo = getattr(window, "_equipment_plugin_loading_method_combo", None)
     if method_combo is not None:
         method_combo.blockSignals(True)
         method_index = method_combo.findData(
-            preferences.get("equipment_plugin_loading_method") or "proxy"
+            window.work_mode_service.deployment_record.get("loading_method") or "native-capture"
         )
         method_combo.setCurrentIndex(max(0, method_index))
         method_combo.blockSignals(False)
@@ -106,12 +107,9 @@ def _settings_paths(context: AppContext) -> SettingsPaths:
     )
 
 
-def _build_sync_card(window):
-    card = window._card("가방 동기화")
-    description = QLabel(
-        "스트리밍 동기화는 가방 내용이 몇 초간 변하지 않으면 SQLite에 기록하고 백그라운드 감시를 계속합니다."
-        "원본 진단 파일은 기본적으로 꺼져 있습니다."
-    )
+def _build_capture_diagnostics_card(window):
+    card = window._card("수집 문제 해결")
+    description = QLabel("수집 문제 해결에만 사용됩니다. 설정은 다음 연결 또는 동기화 시 적용됩니다.")
     description.setWordWrap(True)
     description.setStyleSheet(themed_style("color:#8b949e;font-size:12px"))
     card.layout().addWidget(description)
@@ -122,60 +120,39 @@ def _build_sync_card(window):
     settings = settings_reader() if callable(settings_reader) else {}
     if not settings:
         raise RuntimeError("정적 데이터베이스의 설정 기본값을 읽을 수 없습니다.")
-    window._sync_inventory_method_combo = NoWheelComboBox()
-    window._sync_inventory_method_combo.addItem("로컬 코어 구성 요소 스트리밍 동기화", "nte_core")
-    window._sync_inventory_method_combo.addItem("게임패드 스캔", "gamepad")
-    inventory_index = window._sync_inventory_method_combo.findData(
-        settings["inventory_sync_method"]
-    )
-    window._sync_inventory_method_combo.setCurrentIndex(max(0, inventory_index))
-    form.addRow("가방 획득 방식:", window._sync_inventory_method_combo)
-
-    window._sync_settle_spin = NoWheelDoubleSpinBox()
-    window._sync_settle_spin.setRange(1.0, 30.0)
-    window._sync_settle_spin.setDecimals(1)
-    window._sync_settle_spin.setSingleStep(0.5)
-    window._sync_settle_spin.setSuffix(" 초")
-    window._sync_settle_spin.setValue(float(settings["inventory_settle_seconds"]))
-    form.addRow("내용 안정 대기:", window._sync_settle_spin)
-
-    window._snapshot_retention_spin = NoWheelSpinBox()
-    window._snapshot_retention_spin.setRange(1, 365)
-    window._snapshot_retention_spin.setValue(
-        int(settings["inventory_snapshot_retention_count"])
-    )
-    window._snapshot_retention_spin.setSuffix(" 개")
-    window._snapshot_retention_spin.setToolTip(
-        "현재 스냅샷과 저장된 장착 방안이 참조하는 스냅샷은 항상 유지합니다."
-    )
-    form.addRow("기록 스냅샷 보관:", window._snapshot_retention_spin)
-
     window._sync_capture_device_edit = QLineEdit()
-    window._sync_capture_device_edit.setPlaceholderText("특수한 경우에만 필요합니다. 함부로 입력하지 마세요")
+    window._sync_capture_device_edit.setPlaceholderText("네트워크 어댑터 자동 선택이 실패했을 때만 입력하세요")
     window._sync_capture_device_edit.setText(settings.get("capture_device_id") or "")
+
+    def resize_capture_device_edit(text: str) -> None:
+        content = str(text or window._sync_capture_device_edit.placeholderText())
+        text_width = window._sync_capture_device_edit.fontMetrics().horizontalAdvance(content)
+        window._sync_capture_device_edit.setFixedWidth(
+            max(360, min(680, text_width + 36))
+        )
+
+    resize_capture_device_edit(window._sync_capture_device_edit.text())
+    window._sync_capture_device_edit.textChanged.connect(resize_capture_device_edit)
     form.addRow("캡처 네트워크 어댑터:", window._sync_capture_device_edit)
+    save_handler = getattr(window, "_save_capture_diagnostics", None)
 
-    window._sync_auto_start_toggle = QCheckBox("프로그램 시작 후 자동으로 백그라운드에서 가방을 기다림")
-    window._sync_auto_start_toggle.setChecked(
-        bool(settings["auto_start_inventory_sync"])
-    )
-    form.addRow("자동 시작:", window._sync_auto_start_toggle)
+    def save_capture_diagnostics() -> None:
+        if callable(save_handler):
+            save_handler()
 
-    window._sync_raw_capture_toggle = QCheckBox(
-        "원본 패킷 캡처 저장 (.pcapng, 문제 해결 시에만 켜세요)"
-    )
+    window._sync_capture_device_edit.editingFinished.connect(save_capture_diagnostics)
+
+    window._sync_raw_capture_toggle = QCheckBox("원본 수집 데이터 저장 (문제 해결)")
     window._sync_raw_capture_toggle.setChecked(
         bool(settings["raw_capture_enabled"])
     )
     window._sync_raw_capture_toggle.setToolTip(
-        "가방 동기화와 전투 리포트 수집은 각각 시작 시점의 설정에 따라 원본 패킷을 저장합니다."
-        "파일은 현재 계정의 logs/nte_core/raw_capture에만 저장됩니다."
-        "수집 종료 후 최근 5개를 자동으로 남기고, 기록 파일을 우선 512 MiB까지 압축합니다."
-        "기록 중인 파일과 최신 파일은 삭제되지 않습니다."
+        "문제 해결 시에 켜세요; 데이터는 현재 계정 로그 디렉터리에 저장되고 자동으로 순환되며, 디스크 공간을 많이 차지할 수 있습니다."
     )
     raw_capture_row = QHBoxLayout()
     raw_capture_row.addWidget(window._sync_raw_capture_toggle)
-    raw_capture_open_button = QPushButton("패킷 캡처 디렉터리 열기")
+    raw_capture_open_button = QPushButton("원시 데이터 디렉터리 열기")
+    window._sync_raw_capture_open_button = raw_capture_open_button
     raw_capture_open_handler = getattr(window, "_open_raw_capture_directory", None)
     if callable(raw_capture_open_handler):
         raw_capture_open_button.clicked.connect(raw_capture_open_handler)
@@ -183,51 +160,26 @@ def _build_sync_card(window):
         raw_capture_open_button.setEnabled(False)
     raw_capture_row.addWidget(raw_capture_open_button)
     raw_capture_row.addStretch()
-    form.addRow("진단 패킷 캡처:", raw_capture_row)
-    card.layout().addLayout(form)
+    def save_raw_capture_diagnostics(enabled: bool) -> None:
+        window.work_mode_controller.set_raw_capture_draft(enabled)
+        if window._sync_raw_capture_toggle.isChecked() == enabled:
+            save_capture_diagnostics()
 
-    save_button = QPushButton("동기화 설정 저장")
-    save_button.setObjectName("btnPrimary")
-    save_handler = getattr(window, "_save_sync_settings", None)
-    if callable(save_handler):
-        save_button.clicked.connect(save_handler)
-    else:
-        save_button.setEnabled(False)
-        save_button.setToolTip("현재 페이지 호스트에서 SQLite 동기화 설정이 활성화되지 않았습니다")
-    prune_button = QPushButton("기록 스냅샷 정리")
-    prune_button.setObjectName("btnDanger")
-    prune_handler = getattr(window, "_prune_inventory_snapshots", None)
-    if callable(prune_handler):
-        prune_button.clicked.connect(prune_handler)
-    else:
-        prune_button.setEnabled(False)
-        prune_button.setToolTip("현재 페이지 호스트에서 SQLite 스냅샷 유지 관리가 활성화되지 않았습니다")
-    window._prune_snapshots_button = prune_button
-    actions = QHBoxLayout()
-    actions.addWidget(save_button)
-    actions.addWidget(prune_button)
-    actions.addStretch()
-    card.layout().addLayout(actions)
+    window._sync_raw_capture_toggle.clicked.connect(save_raw_capture_diagnostics)
+    form.addRow("수집 문제 해결:", raw_capture_row)
+    card.layout().addLayout(form)
     return card
 
 
 def _build_environment_card(window):
     card = window._card("환경 설정")
     window._environment_configuration_card = card
-    npcap_title = QLabel("Npcap · 가방 동기화 필수")
+    npcap_title = QLabel("Npcap · 데이터 동기화, 전투 리포트 수집")
     npcap_title.setStyleSheet(themed_style("font-weight:700;font-size:14px"))
     card.layout().addWidget(npcap_title)
-    npcap_description = QLabel(
-        "Npcap 패킷 캡처는 가방 인식에 사용됩니다. 어느 정도 위험은 있지만 비전 스캔 스냅샷보다 낮으므로 우선 사용을 권장합니다."
-    )
-    npcap_description.setTextFormat(Qt.RichText)
-    npcap_description.setWordWrap(False)
-    npcap_description.setStyleSheet(
-        themed_style("color:#8b949e;font-size:12px")
-    )
-    card.layout().addWidget(npcap_description)
     npcap_row = QHBoxLayout()
     npcap_install_button = QPushButton("Npcap 1.88 다운로드")
+    window._npcap_install_button = npcap_install_button
     npcap_install_button.clicked.connect(window._open_npcap_download)
     npcap_row.addWidget(npcap_install_button)
     npcap_status_button = QPushButton("Npcap 상태 확인")
@@ -239,14 +191,12 @@ def _build_environment_card(window):
     npcap_row.addStretch()
     card.layout().addLayout(npcap_row)
 
-    equipment_title = QLabel("장비 플러그인 · 고속 장착 필수")
+    equipment_title = QLabel("게임 내 컴포넌트 · 초고속 장착, 폐기 잠금, 플러그인, 기능 강화")
     equipment_title.setStyleSheet(themed_style("font-weight:700;font-size:14px"))
     card.layout().addWidget(equipment_title)
     equipment_description = QLabel(
-        "<b>간단한 원리:</b> 기본적으로 dwmapi.dll을 게임 디렉터리에 넣어 게임이 프록시로 로드하게 합니다."
-        "일부 환경에서 프록시 DLL이 로드되지 않으면 관리자 권한 Mod Loader로 명시적으로 전환할 수 있습니다."
-        "<br><span style='color:#d29922'><b>위험 안내:</b> 이 기능은 게임 프로세스에 개입하지만 게임 데이터를 직접 변조하지는 않습니다."
-        "그래도 게임 보호 기능이 작동해 호환 문제나 계정 위험이 생길 수 있습니다.</span>"
+        "<span style='color:#d29922'><b>위험 안내:</b> 구성 요소는 게임 안에 로드되며,"
+        "게임 보호나 호환성 문제를 일으킬 수 있습니다.</span>"
     )
     equipment_description.setTextFormat(Qt.RichText)
     equipment_description.setWordWrap(True)
@@ -257,16 +207,14 @@ def _build_environment_card(window):
     form = QFormLayout()
     window._equipment_plugin_loading_method_combo = NoWheelComboBox()
     window._equipment_plugin_loading_method_combo.addItem(
-        "프록시 DLL (권장)", "proxy"
+        "D3D 수집 프록시", "native-capture"
     )
     window._equipment_plugin_loading_method_combo.addItem(
-        "Mod Loader (예비)", "loader"
+        "네이티브 Loader (예비)", "loader"
     )
     loading_method = str(
-        (getattr(window, "_ui_preferences", {}) or {}).get(
-            "equipment_plugin_loading_method"
-        )
-        or "proxy"
+        window.work_mode_service.deployment_record.get("loading_method")
+        or "native-capture"
     )
     method_index = window._equipment_plugin_loading_method_combo.findData(
         loading_method
@@ -274,6 +222,7 @@ def _build_environment_card(window):
     window._equipment_plugin_loading_method_combo.setCurrentIndex(
         max(0, method_index)
     )
+    window._equipment_plugin_loading_method_combo.setFixedWidth(180)
     window._equipment_plugin_loading_method_combo.currentIndexChanged.connect(
         window._equipment_plugin_loading_method_changed
     )
@@ -282,13 +231,9 @@ def _build_environment_card(window):
     window._equipment_plugin_game_executable_edit.setPlaceholderText(
         "HTGame.exe의 전체 파일 경로를 직접 붙여넣을 수 있습니다"
     )
-    window._equipment_plugin_game_executable_edit.setText(
-        str(
-            (getattr(window, "_ui_preferences", {}) or {}).get(
-                "equipment_plugin_game_executable"
-            )
-            or ""
-        )
+    window._equipment_plugin_game_executable_edit.setText(window.work_mode_service.settings.game_executable)
+    window._equipment_plugin_game_executable_edit.editingFinished.connect(
+        lambda: window.work_mode_service.set_game_executable(window._equipment_plugin_game_executable_edit.text().strip())
     )
     window._equipment_plugin_game_executable_edit.textChanged.connect(
         lambda _text: window._refresh_equipment_plugin_status()
@@ -306,35 +251,13 @@ def _build_environment_card(window):
     form.addRow("게임 실행 파일:", game_row)
     card.layout().addLayout(form)
 
-    consent_row = QHBoxLayout()
-    window._equipment_plugin_consent = QCheckBox(
-        "위 위험을 읽고 이해했으며, 그래도 장비 플러그인을 자발적으로 사용하고 그에 따른 위험을 감수합니다"
-    )
-    window._equipment_plugin_consent.setStyleSheet(
-        themed_style("color:#d29922;font-weight:600")
-    )
-    window._equipment_plugin_consent.setChecked(
-        bool(
-            (getattr(window, "_ui_preferences", {}) or {}).get(
-                "equipment_plugin_risk_acknowledged", False
-            )
-        )
-    )
-    window._equipment_plugin_consent.toggled.connect(
-        window._equipment_plugin_risk_acknowledgement_changed
-    )
-    consent_row.addWidget(window._equipment_plugin_consent)
-    window._dwmapi_diagnostic_button = QPushButton("dwmapi 진단")
-    window._dwmapi_diagnostic_button.clicked.connect(window._diagnose_dwmapi)
-    consent_row.addWidget(window._dwmapi_diagnostic_button)
-    consent_row.addStretch()
-    card.layout().addLayout(consent_row)
     window._equipment_plugin_status_label = QLabel()
-    window._equipment_plugin_status_label.setWordWrap(True)
+    window._equipment_plugin_status_label.setWordWrap(False)
     window._equipment_plugin_status_label.setStyleSheet(
         themed_style("color:#8b949e;font-size:12px")
     )
     card.layout().addWidget(window._equipment_plugin_status_label)
+
     actions = QHBoxLayout()
     window._equipment_plugin_primary_button = QPushButton("프록시 DLL 배포")
     window._equipment_plugin_primary_button.setObjectName("btnPrimary")
@@ -342,7 +265,7 @@ def _build_environment_card(window):
         window._activate_equipment_plugin_loading_method
     )
     actions.addWidget(window._equipment_plugin_primary_button)
-    window._equipment_plugin_stop_button = QPushButton("게임 디렉터리 복원")
+    window._equipment_plugin_stop_button = QPushButton("게임 디렉터리 정리")
     window._equipment_plugin_stop_button.setObjectName("btnDanger")
     window._equipment_plugin_stop_button.clicked.connect(
         window._deactivate_equipment_plugin_loading_method
@@ -379,6 +302,9 @@ def build_settings_page(
     layout = QVBoxLayout(page)
     layout.setContentsMargins(20, 16, 20, 16)
     layout.setSpacing(16)
+
+    mode_card = build_work_mode_card(window)
+    layout.addWidget(mode_card)
 
     log_card = window._card("도구 설정")
     log_row = QHBoxLayout()
@@ -455,7 +381,7 @@ def build_settings_page(
     log_card.layout().addLayout(theme_row)
     layout.addWidget(log_card)
 
-    sync_card = _build_sync_card(window)
+    sync_card = _build_capture_diagnostics_card(window)
     plugin_card = _build_environment_card(window)
     hotkey_card = window._card("단축키 설정")
 
@@ -688,4 +614,12 @@ def build_settings_page(
     layout.addWidget(thanks_card)
 
     layout.addStretch()
+    window.work_mode_controller.attach_settings_targets(
+        scroll=scroll, mode_card=mode_card, component_card=plugin_card,
+        component_focus=window._equipment_plugin_primary_button,
+        game_path_focus=window._equipment_plugin_game_executable_edit,
+        loading_method_focus=window._equipment_plugin_loading_method_combo,
+        npcap_focus=window._npcap_install_button,
+        core_focus=window._nte_core_diagnostic_button,
+    )
     return scroll

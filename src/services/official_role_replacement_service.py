@@ -272,7 +272,7 @@ def save_official_role_replacement(
     context = (detail.get("equipment_contexts") or {}).get(context_key) or {}
     plan = context.get("plan")
     if not isinstance(plan, Mapping) or plan.get("source_snapshot_id") is None:
-        raise ValueError("먼저 SQLite 장비 세팅 방안을 하나 저장한 뒤 교체 최적화를 사용하세요")
+        raise ValueError("먼저 장비 구성 방안을 하나 저장한 후 교체 최적화를 사용하세요")
     original_assignments = []
     assignments = []
     replaced = False
@@ -298,7 +298,7 @@ def save_official_role_replacement(
             replaced = True
         assignments.append(assignment)
     if not replaced:
-        raise ValueError("대상 장비가 현재 SQLite 장비 세팅 방안에 속하지 않습니다")
+        raise ValueError("대상 장비가 현재 장비 구성 방안에 속하지 않습니다")
     if len({(int(row.get("uid_serial") or 0), int(row.get("uid_slot") or 0)) for row in assignments}) != len(assignments):
         raise ValueError("교체 장비가 이미 현재 방안에서 사용 중입니다")
     target_kind = str(target.get("kind") or "")

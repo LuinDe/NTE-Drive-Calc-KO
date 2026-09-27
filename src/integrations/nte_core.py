@@ -1,6 +1,12 @@
 # 封装 nte-core 的进程生命周期、JSON-RPC 请求和异步事件分发。
 
 from __future__ import annotations
+from src.integrations.nte_core_equipment import (
+    equipment_uid as _equipment_uid, equipment_grid_position as _equipment_grid_position,
+    equipment_state as _equipment_state, state_batch_params,
+)
+from src.integrations.nte_core_launch import core_serve_command
+from src.integrations.nte_core_response_wait import wait_core_response
 
 import hashlib
 import itertools
@@ -16,10 +22,9 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from src.integrations.nte_core_events import (
-    CoalescingEventQueue as _CoalescingEventQueue,
-)
+from src.integrations.nte_core_events import CoalescingEventQueue as _CoalescingEventQueue
 from src.integrations.nte_core_battle_client import NteCoreBattleQueryMixin
+from src.integrations.native_capture_process import native_capture_game_pid
 from src.integrations.nte_core_protocol import (
     JsonObject,
     MODS_PLUGIN_BUSY_CODES,
@@ -36,6 +41,7 @@ from src.integrations.nte_core_protocol import (
     is_mods_plugin_unavailable_error,
     equipment_request_failure_kind,
     nte_core_error_has_domain_code,
+    translate_native_start_error,
 )
 
 __all__ = [
@@ -59,50 +65,9 @@ __all__ = [
 PROTOCOL_VERSION = 1
 NTE_CORE_ENV = "NTE_CORE_EXE"
 _CALLBACK_STOP = object()
-_U32_MAX = (1 << 32) - 1
 _MAX_EQUIPMENT_PLACEMENTS = 64
 EventHandler = Callable[[JsonObject], None]
 StderrHandler = Callable[[str], None]
-
-
-def _equipment_uid(uid: object, field: str) -> JsonObject:
-    if not isinstance(uid, Mapping):
-        raise ValueError(f"{field} must be an item UID object")
-    slot = uid.get("slot")
-    serial = uid.get("serial")
-    for component, value in (("slot", slot), ("serial", serial)):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value <= 0
-            or value >= _U32_MAX
-        ):
-            raise ValueError(
-                f"{field}.{component} must be an integer in 1..4294967294"
-            )
-    return {"slot": slot, "serial": serial}
-
-
-def _equipment_grid_position(
-    row: object,
-    column: object,
-) -> tuple[int, int]:
-    if (
-        isinstance(row, bool)
-        or not isinstance(row, int)
-        or isinstance(column, bool)
-        or not isinstance(column, int)
-        or not 1 <= row <= 5
-        or not 1 <= column <= 5
-    ):
-        raise ValueError("row and column must be integers in 1..5")
-    return row, column
-
-
-def _equipment_state(value: bool, field: str) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError(f"{field} must be a boolean")
-    return value
 
 
 def _deduplicated_paths(paths: Sequence[Path]) -> list[Path]:
@@ -175,11 +140,8 @@ def resolve_nte_core_executable(executable: str | os.PathLike[str] | None = None
 
 
 class NteCoreClient(NteCoreBattleQueryMixin):
-    """管理一个 nte-core 进程，并向调用方暴露原始业务 DTO。
-
-    匹配的事件处理器在专用回调线程执行并接管对应事件；未处理事件仍可通过
-    get_event 和 drain_events 获取。所属组件退出时，调用方必须关闭客户端。
-    """
+    """管理 Core 进程与原始 DTO；匹配事件在专用回调线程接管，未匹配事件进入事件队列。
+    所属组件退出时调用方必须关闭客户端。"""
 
     def __init__(
         self,
@@ -193,6 +155,7 @@ class NteCoreClient(NteCoreBattleQueryMixin):
         timeout: float = 10.0,
         cwd: str | os.PathLike[str] | None = None,
         stderr_handler: StderrHandler | None = None,
+        required_source: Literal["native", "packet"] = "packet",
     ) -> None:
         if executable is not None and command is not None:
             raise ValueError("executable and command are mutually exclusive")
@@ -210,6 +173,10 @@ class NteCoreClient(NteCoreBattleQueryMixin):
         self.timeout = timeout
         self.cwd = Path(cwd).resolve() if cwd is not None else None
         self.stderr_handler = stderr_handler
+        if required_source not in {"native", "packet"}:
+            raise ValueError("required_source must be native or packet")
+        self.native_capture = False
+        self.required_source = required_source
 
         self._process: subprocess.Popen[str] | None = None
         self._request_ids = itertools.count(1)
@@ -245,12 +212,10 @@ class NteCoreClient(NteCoreBattleQueryMixin):
         base = self._base_command
         if base is None:
             base = [str(resolve_nte_core_executable(self._explicit_executable))]
-        command = [*base, "serve", "--stdio"]
-        if self.data_dir is not None:
-            command.extend(["--data-dir", str(self.data_dir)])
-        if self.log_level:
-            command.extend(["--log-level", self.log_level])
-        return command
+        game_pid = native_capture_game_pid() if self.required_source == "native" else None
+        self.native_capture = game_pid is not None
+        return core_serve_command(base, game_pid=game_pid, required_source=self.required_source,
+                                  data_dir=self.data_dir, log_level=self.log_level)
 
     def start(self) -> NteCoreClient:
         if self._process is not None:
@@ -315,9 +280,9 @@ class NteCoreClient(NteCoreBattleQueryMixin):
                 )
             self.hello_result = dict(result)
             return self
-        except BaseException:
+        except BaseException as error:
             self.close()
-            raise
+            raise translate_native_start_error(error, self.recent_stderr)
 
     def _read_stdout(self) -> None:
         assert self._process is not None and self._process.stdout is not None
@@ -326,6 +291,9 @@ class NteCoreClient(NteCoreBattleQueryMixin):
                 try:
                     message = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    from src.integrations.native_transport_diagnostics import invalid_json
+                    invalid_json(line, exc, executable_sha256=self.executable_sha256,
+                                 exit_code=self._process.poll(), core_pid=self._process.pid)
                     raise NteCoreProtocolError(
                         "nte-core emitted invalid JSON on stdout"
                     ) from exc
@@ -371,6 +339,8 @@ class NteCoreClient(NteCoreBattleQueryMixin):
             if not message:
                 continue
             self._recent_stderr.append(message)
+            from src.integrations.native_transport_diagnostics import output_diagnostic
+            output_diagnostic(message, executable_sha256=self.executable_sha256, core_pid=self._process.pid)
             if self.stderr_handler is not None:
                 try:
                     self.stderr_handler(message)
@@ -419,7 +389,10 @@ class NteCoreClient(NteCoreBattleQueryMixin):
         params: Mapping[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> Any:
+        if check_cancelled is not None:
+            check_cancelled()
         if not self.is_running:
             if self._reader_error is not None:
                 raise self._reader_error
@@ -445,10 +418,8 @@ class NteCoreClient(NteCoreBattleQueryMixin):
             with self._write_lock:
                 self._process.stdin.write(payload)
                 self._process.stdin.flush()
-            try:
-                response = response_queue.get(timeout=request_timeout)
-            except queue.Empty as exc:
-                raise NteCoreTimeoutError(method, request_timeout) from exc
+            response = wait_core_response(response_queue, method=method, timeout=request_timeout,
+                                          check_cancelled=check_cancelled)
         except (BrokenPipeError, OSError) as exc:
             raise self._process_error(f"could not write nte-core request: {exc}") from exc
         finally:
@@ -515,6 +486,7 @@ class NteCoreClient(NteCoreBattleQueryMixin):
         include_incoming: bool = True,
         server_damage_calibration: bool = True,
         raw_capture: Literal["enabled", "disabled"] = "disabled",
+        wait_for_game: bool = False,
     ) -> JsonObject:
         if profile not in ("inventory", "combat"):
             raise ValueError("profile must be 'inventory' or 'combat'")
@@ -525,6 +497,7 @@ class NteCoreClient(NteCoreBattleQueryMixin):
             if device_name is not None
             else {"mode": "auto"}
         )
+        wait_options = {"wait_for_game": True} if wait_for_game else {}
         return self.call(
             "capture.start",
             {
@@ -533,6 +506,7 @@ class NteCoreClient(NteCoreBattleQueryMixin):
                 "include_incoming": include_incoming,
                 "server_damage_calibration": server_damage_calibration,
                 "raw_capture": raw_capture,
+                **wait_options,
             },
         )
 
@@ -715,6 +689,9 @@ class NteCoreClient(NteCoreBattleQueryMixin):
                 "locked": _equipment_state(locked, "locked"),
             },
         )
+
+    def set_item_states(self, *, operations: Sequence[Mapping[str, Any]]) -> JsonObject:
+        return self._equipment_request("set_item_states", state_batch_params(operations))
 
     def get_battle_summary(self, *, subtract_time_stop: bool = True) -> JsonObject | None:
         return self.call(

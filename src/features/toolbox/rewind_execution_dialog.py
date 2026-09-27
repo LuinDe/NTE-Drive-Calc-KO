@@ -45,11 +45,9 @@ class RewindExecutionDialog(QDialog):
         root = QVBoxLayout(self)
         root.setSpacing(12)
         prerequisite = QLabel(
-            "사용 전에 게임 내 되감기 페이지를 미리 열어 두세요. 이 기능은 아직 실험 단계이며,"
-            "현재 실제 기기 테스트 조건이 없어 동작을 보장하지 않습니다. 실행 중에는 설정의 전역 중지 키"
-            f"({self._stop_hotkey_label()})로 중지할 수 있습니다."
+            f"실행 중에는 설정의 전역 중지 키{self._stop_hotkey_label()}를 눌러 중지할 수 있습니다."
         )
-        prerequisite.setObjectName("rewindExperimentalNotice")
+        prerequisite.setObjectName("rewindStopNotice")
         prerequisite.setWordWrap(True)
         prerequisite.setStyleSheet(themed_style(
             "background:#1f6feb33;color:#58a6ff;border:1px solid #58a6ff;"
@@ -122,7 +120,7 @@ class RewindExecutionDialog(QDialog):
             if configuration is not None:
                 return str(getattr(configuration, "stop", "전역 중지 키"))
             parent = parent.parentWidget()
-        return "전역 중지 키"
+        return "F12"
 
     @staticmethod
     def _tile(label: str, tone: str, *, checked: bool) -> QPushButton:

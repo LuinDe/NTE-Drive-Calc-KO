@@ -11,8 +11,9 @@ def decode_hit_details(value, analysis, candidate):
     if value is None:
         return None
     try:
-        if not isinstance(value, dict) or value.get("result_encoding") != "interned_v1":
+        if not isinstance(value, dict) or value.get("result_encoding") not in {"interned_v1", "interned_v2"}:
             raise ValueError
+        evidence_fields = value["result_encoding"] == "interned_v2"
         def table(name):
             rows = value[name]
             if not isinstance(rows, list):
@@ -47,10 +48,14 @@ def decode_hit_details(value, analysis, candidate):
                 ref(strings,row[4]),ref(strings,row[5])))
         decisions = []
         for row in table("decisions"):
-            if not isinstance(row,list) or len(row) != 5 or ref(strings,row[2]) not in {"applied","not_applied","unresolved"}:
+            if not isinstance(row,list) or len(row) != (7 if evidence_fields else 5) or ref(strings,row[2]) not in {"applied","not_applied","unresolved"}:
+                raise ValueError
+            stacks = row[5] if evidence_fields else None
+            confidence = ref(strings, row[6]) if evidence_fields else ""
+            if (stacks is not None and (type(stacks) is not int or stacks < 0)) or confidence not in {"", "未知", "未解析", "低", "中", "高"}:
                 raise ValueError
             decisions.append(BattleBuffProjectionDecision(
-                ref(strings,row[0]),ref(strings,row[1]),ref(strings,row[2]),texts(row[3]),texts(row[4])))
+                ref(strings,row[0]),ref(strings,row[1]),ref(strings,row[2]),texts(row[3]),texts(row[4]),stacks,confidence))
         projections = []
         for row in table("projections"):
             if not isinstance(row,list) or len(row) != 7:
@@ -61,7 +66,7 @@ def decode_hit_details(value, analysis, candidate):
                                 indices(strings,row[3]),indices(strings,row[4]),row[5],indices(decisions,row[6])))
         jobs = {}
         for row in table("results"):
-            if not isinstance(row,dict) or set(row) != {"job_id","projection_index"} or type(row["job_id"]) is not str:
+            if not isinstance(row,dict) or not {"job_id","projection_index"} <= row.keys() or type(row["job_id"]) is not str:
                 raise ValueError
             section, kind, event_id = row["job_id"].split(":",2)
             projection = ref(projections,row["projection_index"])

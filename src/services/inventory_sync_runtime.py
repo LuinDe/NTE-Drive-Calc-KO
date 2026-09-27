@@ -10,11 +10,13 @@ from typing import Any
 
 from src.observability import log_event
 from src.services.account_settings_service import AccountSettingsService
+from src.services.all_item_snapshot_storage import store_all_item_snapshot
 from src.services.raw_capture_retention import prune_raw_capture_files
 from src.storage.sqlite.inventory_save_error import InventorySnapshotSaveError
 from src.utils.logger import logger
 
 from .inventory_sync_contracts import InventoryCoreClient
+from .inventory_capture_wait import CaptureStartError, InventorySyncCancelled, require_inventory_operation, wait_capture_ready
 from .inventory_sync_logging import (
     InventorySyncDiagnostics,
     inventory_core_log_fields,
@@ -50,6 +52,21 @@ def _snapshot_listening_message(
     return "가방이 동기화되었으며 백그라운드에서 변화를 감시하는 중"
 
 
+def _snapshot_waiting_message(summary, has_character_list):
+    if summary is None:
+        return "수신 대기가 준비되었습니다. 게임 진입과 가방 데이터 수신을 기다립니다."
+    source = summary.get("source")
+    if is_visual_inventory_source(source):
+        previous = "현재는 시각 스캔 기반 인벤토리로, 캐릭터 인스턴스를 제공하지 않습니다"
+    elif has_native_inventory_uids(source) and not has_character_list:
+        previous = "마지막 네이티브 가방에 독립된 캐릭터 목록이 첨부되지 않았습니다"
+    elif not has_native_inventory_uids(source):
+        previous = "마지막 인벤토리 출처는 아직 네이티브 캐릭터 식별 정보를 지원하지 않습니다"
+    else:
+        previous = "마지막으로 저장한 가방은 여전히 계산에 사용할 수 있습니다"
+    return f"수신 대기가 준비되었습니다. 이번 가방 데이터를 기다립니다; {previous}."
+
+
 def run_inventory_sync(service: Any) -> None:
     client: InventoryCoreClient | None = None
     fatal_error: Exception | None = None
@@ -58,12 +75,14 @@ def run_inventory_sync(service: Any) -> None:
     stabilizer: InventorySnapshotStabilizer | None = None
     current_id: int | None = None
     try:
+        require_inventory_operation(service)
         with service._open_dao() as dao:
             settings = AccountSettingsService(service.database_path).load("sync")
+            native = service.capture_source == "native"
             settle_seconds = (
                 service._settle_seconds
                 if service._settle_seconds is not None
-                else float(settings["inventory_settle_seconds"])
+                else (0.2 if native else float(settings["inventory_settle_seconds"]))
             )
             stabilizer = InventorySnapshotStabilizer(settle_seconds)
             current_id = dao.current_inventory_snapshot_id()
@@ -103,6 +122,7 @@ def run_inventory_sync(service: Any) -> None:
             )
 
             sync_stage = "starting_core"
+            require_inventory_operation(service)
             client = service._client_factory()
             service._client = client
             client.start()
@@ -123,6 +143,10 @@ def run_inventory_sync(service: Any) -> None:
             raw_enabled = service._raw_capture_enabled
             if raw_enabled is None:
                 raw_enabled = bool(settings.get("raw_capture_enabled"))
+            if native:
+                capture_device, raw_enabled = None, False
+            if raw_enabled:
+                require_inventory_operation(service, "diagnostics")
             if raw_enabled and service._raw_capture_directory is not None:
                 service._raw_capture_directory.mkdir(parents=True, exist_ok=True)
                 service._prune_raw_captures()
@@ -134,31 +158,29 @@ def run_inventory_sync(service: Any) -> None:
                     directory=service._raw_capture_directory,
                 )
             sync_stage = "starting_capture"
-            client.start_capture(
+            require_inventory_operation(service)
+            supports_wait = not native and "capture_wait_v1" in (client.hello_result or {}).get("capabilities", ())
+            capture_result = client.start_capture(
                 profile="inventory",
                 device_name=capture_device,
                 raw_capture="enabled" if raw_enabled else "disabled",
+                **({"wait_for_game": True} if supports_wait else {}),
             )
+            service._capture_monitor.update(capture_result)
             sync_stage = "waiting_capture_ready"
             service._publish(
                 "starting",
-                "패킷 캡처를 초기화하는 중이며 네트워크 어댑터 준비를 기다립니다",
+                "DLL 가방 소스에 연결하는 중" if native else "패킷 캡처를 초기화하는 중이며 네트워크 어댑터 준비를 기다립니다",
                 running=True,
-                capturing=True,
+                capturing=False,
                 last_snapshot_id=current_id,
             )
-            capture_ready_deadline = time.monotonic() + 15.0
-            while not service._stop_requested.is_set() and not service._capture_ready.wait(
-                service._poll_seconds
-            ):
-                if time.monotonic() >= capture_ready_deadline:
-                    raise TimeoutError("nte-core 패킷 캡처 초기화 시간 초과, running 상태로 진입하지 못했습니다")
-            if service._stop_requested.is_set():
+            if not wait_capture_ready(service, client, supports_wait=supports_wait, diagnostics=bool(raw_enabled)):
                 return
             log_event(
                 "INFO",
                 "inventory_sync.capture_started",
-                "가방 동기화 패킷 캡처가 준비되었으며 완전한 가방 스냅샷을 기다립니다",
+                "가방 동기화 소스가 준비되었으며, 완전한 가방 스냅샷을 기다리는 중",
                 service._operation_context,
                 raw_capture=bool(raw_enabled),
                 capture_device_configured=bool(capture_device),
@@ -176,10 +198,10 @@ def run_inventory_sync(service: Any) -> None:
                     ),
                 )
             service._publish(
-                "waiting" if current_summary is None else "listening",
-                _snapshot_listening_message(current_summary, current_has_character_instances),
+                "waiting",
+                _snapshot_waiting_message(current_summary, current_has_character_instances),
                 running=True,
-                capturing=True,
+                capturing=not native,
                 last_snapshot_id=current_id,
                 last_item_count=(
                     int(current_summary["stored_item_count"])
@@ -189,9 +211,35 @@ def run_inventory_sync(service: Any) -> None:
             )
 
             retry_save_at = 0.0
+            next_native_status = 0.0
+            native_status_message = None
             guard_generation, _guard_uids = service._full_inventory_guard()
             while not service._stop_requested.is_set():
                 service._event_ready.wait(service._poll_seconds)
+                require_inventory_operation(service)
+                if raw_enabled:
+                    require_inventory_operation(service, "diagnostics")
+                if native and time.monotonic() >= next_native_status:
+                    native_status = client.status()
+                    require_inventory_operation(service)
+                    service._capture_monitor.update(native_status)
+                    next_native_status = time.monotonic() + (
+                        0.2 if native_status.get("native_change_pending") else 1.0
+                    )
+                    _apply_native_profiles(service, native_status)
+                    store_all_item_snapshot(service, dao, client, native_status)
+                    if not native_status.get("native_snapshot_ready", False):
+                        stabilizer.discard_pending()
+                        service._take_latest_event()  # Do not re-offer an observation invalidated during this poll.
+                        message = str(native_status.get("message") or "DLL이 완전한 가방 스냅샷을 제공하기를 기다리고 있습니다.")
+                        if message != native_status_message:
+                            service._publish("waiting", message, running=True, capturing=False, source_snapshot_ready=False)
+                        native_status_message = message
+                    else:
+                        native_status_message = None
+                capture_status, capture_error = service._capture_monitor.read()
+                if capture_status == "failed":
+                    raise CaptureStartError(capture_error or "CAPTURE_FAILED")
                 diagnostics.summary(
                     phase=service.state.phase, pending_item_count=stabilizer.pending_item_count,
                     snapshot_id=current_id,
@@ -202,6 +250,7 @@ def run_inventory_sync(service: Any) -> None:
                     for source_snapshot_id, items, observed_at, sequence in (
                         service._take_pending_runtime_state_deltas()
                     ):
+                        require_inventory_operation(service)
                         updated_count = dao.apply_inventory_runtime_state_delta(
                             source_snapshot_id,
                             items,
@@ -269,6 +318,7 @@ def run_inventory_sync(service: Any) -> None:
                         service._publish(
                             "collecting",
                             f"{result.item_count}개를 받았으며 가방 내용 안정을 기다립니다",
+                            source_snapshot_ready=True,
                             running=True,
                             capturing=True,
                             pending_item_count=result.item_count,
@@ -290,6 +340,7 @@ def run_inventory_sync(service: Any) -> None:
                             _snapshot_listening_message(
                                 current_summary, current_has_character_instances, received=True,
                             ),
+                            source_snapshot_ready=True,
                             running=True,
                             capturing=True,
                             pending_item_count=None,
@@ -302,6 +353,14 @@ def run_inventory_sync(service: Any) -> None:
                 stable = stabilizer.ready(now=now)
                 if stable is None or now < retry_save_at:
                     continue
+                if native and not client.confirm_inventory_snapshot(stable.payload.get("native_snapshot")):
+                    # Validate only the candidate's revision. Do not start a full
+                    # read here or let an unrelated character refresh delay saving.
+                    stabilizer.discard_pending()
+                    next_native_status = 0.0
+                    service._publish("waiting", "가방에 다시 변화가 생겨, 병합하여 업데이트하는 중입니다.", running=True,
+                                     capturing=False, source_snapshot_ready=False, pending_item_count=None)
+                    continue
                 service._publish(
                     "saving",
                     f"가방이 안정되어 {stable.item_count}개를 저장하는 중",
@@ -310,6 +369,7 @@ def run_inventory_sync(service: Any) -> None:
                     pending_item_count=stable.item_count,
                 )
                 sync_stage = "saving_snapshot"
+                require_inventory_operation(service)
                 try:
                     snapshot_id = dao.import_inventory_snapshot(
                         stable.message,
@@ -395,7 +455,7 @@ def run_inventory_sync(service: Any) -> None:
                             error=exc,
                         )
                 try:
-                    retention = dao.prune_inventory_snapshots()
+                    retention = dao.prune_inventory_snapshots(retain_recent=3 if native else None)
                     if retention["deleted_snapshot_count"]:
                         log_event(
                             "INFO",
@@ -432,6 +492,8 @@ def run_inventory_sync(service: Any) -> None:
                     error_code=None,
                 )
                 sync_stage = "listening"
+    except InventorySyncCancelled:
+        pass
     except Exception as exc:
         fatal_error = exc
         log_event(
@@ -500,9 +562,35 @@ def run_inventory_sync(service: Any) -> None:
             )
 
 
+def _apply_native_profiles(service, status):
+    apply = service._native_profiles_apply
+    if apply is None:
+        return
+    snapshot = status.get("native_character_snapshot")
+    error = status.get("native_character_error")
+    if snapshot is not None:
+        try:
+            require_inventory_operation(service)
+            result = apply(snapshot["profiles"], check=lambda: require_inventory_operation(service))
+            require_inventory_operation(service)
+        except (InventorySyncCancelled, PermissionError):
+            raise
+        except Exception as exc:
+            log_event("WARNING", "inventory_sync.character_save_failed", "캐릭터 자동 동기화가 저장되지 않았습니다",
+                      service._operation_context, error_type=type(exc).__name__)
+            error = "캐릭터 자동 동기화가 저장되지 않아 기존 육성을 유지했습니다; 잠시 후 자동으로 재시도합니다."
+        else:
+            error = result.message if result.warnings else None
+            service._publish(service.state.phase, service.state.message,
+                             character_sync_revision=service.state.character_sync_revision + bool(result.saved_count),
+                             character_sync_error=error)
+    if error and error != service.state.character_sync_error:
+        service._publish(service.state.phase, service.state.message, character_sync_error=error)
+
+
 def prune_raw_captures(service: Any) -> None:
     """Best-effort cleanup; packet capture must never fail because pruning did."""
-    if service._raw_capture_directory is None:
+    if service.capture_source == "native" or service._raw_capture_directory is None:
         return
     try:
         result = prune_raw_capture_files(service._raw_capture_directory)

@@ -126,13 +126,18 @@ class BattleBuildEditDaoMixin(UserDataDaoMixinHost):
         return result
 
     def battle_report_equipment_editable(self, battle_record_id: int) -> bool:
+        build = self.load_battle_build_snapshot(battle_record_id)
         return (
             self.load_battle_report_import_origin(battle_record_id) is None
-            and not has_graduation_assumption(self.load_battle_build_snapshot(battle_record_id))
+            and not has_graduation_assumption(build)
+            and (build or {}).get("calculation_status", {}).get("state") != "unknown"
         )
 
     def battle_report_counterfactual_editable(self, battle_record_id: int) -> bool:
         record_id = _integer(battle_record_id, "battle_record_id", minimum=1)
+        build = self.load_battle_build_snapshot(record_id)
+        if (build or {}).get("calculation_status", {}).get("state") == "unknown":
+            return False
         row = self._one(
             """
             SELECT contract_version, capture_state
@@ -352,8 +357,9 @@ class BattleBuildEditDaoMixin(UserDataDaoMixinHost):
                 if str(effect_id).strip()
             )
         )
-        if len(selected_awakenings) > 6:
-            raise UserDataValidationError("각성 선택은 6개를 넘을 수 없습니다")
+        awakening_level = _integer(profile.get("awakening_level"), "awakening_level", minimum=0)
+        if awakening_level > 6 or len(selected_awakenings) > awakening_level:
+            raise UserDataValidationError("각성 선택은 각성 레벨을 초과할 수 없고, 각성 레벨은 6을 초과할 수 없습니다")
         character_level = _integer(profile.get("character_level"), "character_level", minimum=1)
         breakthrough_stage = _integer(
             profile.get("breakthrough_stage"), "breakthrough_stage", minimum=0
@@ -396,7 +402,7 @@ class BattleBuildEditDaoMixin(UserDataDaoMixinHost):
             "profile_source": "user_edited_snapshot",
             "character_level": character_level,
             "breakthrough_stage": breakthrough_stage,
-            "awakening_level": len(selected_awakenings),
+            "awakening_level": awakening_level,
             "selected_awaken_effect_ids": list(selected_awakenings),
             "awakening_selection_initialized": True,
             "likeability_level_10_enabled": bool(

@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from src.integrations.operation_guard import OperationGuard, bind_execution_guard
 
 from src.app.context import AppContext
 
@@ -19,11 +20,14 @@ class ScanningDependencies:
     screenshot_dir: Path
     user_config_dir: Path
     user_database_path: Path
+    static_database_path: Path
+    game_ui_asset_root: Path
     config_dir: Path
     template_dir: Path
+    operation_guard: OperationGuard | None = None
 
     @classmethod
-    def from_app_context(cls, app_context: AppContext) -> "ScanningDependencies":
+    def from_app_context(cls, app_context: AppContext, *, operation_guard: OperationGuard | None = None) -> "ScanningDependencies":
         account = app_context.account
         return cls(
             account_id=account.active_account_id,
@@ -31,13 +35,20 @@ class ScanningDependencies:
             screenshot_dir=account.screenshot_dir,
             user_config_dir=account.user_config_dir,
             user_database_path=account.user_database_path,
+            static_database_path=app_context.paths.equipment_allocation_database_path,
+            game_ui_asset_root=app_context.paths.equipment_allocation_asset_root,
             config_dir=app_context.paths.config_dir,
             template_dir=app_context.paths.template_dir,
+            operation_guard=operation_guard,
         )
 
 
 def current_scanning_dependencies(owner: Any) -> ScanningDependencies:
-    return ScanningDependencies.from_app_context(owner.app_context)
+    guard = bind_execution_guard(
+        getattr(owner, "operation_guard", None), should_stop=lambda: False,
+        generation=getattr(owner, "operation_generation", None),
+    )
+    return ScanningDependencies.from_app_context(owner.app_context, operation_guard=guard)
 
 
 def task_scanning_dependencies(owner: Any) -> ScanningDependencies:

@@ -1,0 +1,204 @@
+# 冻结保存按钮输入，在后台批量持久化并按真实阶段更新进度。
+from __future__ import annotations
+
+from concurrent.futures import CancelledError
+from copy import deepcopy
+import time
+
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout
+
+from src.app.constants import SUPPORT_US_URL
+from src.app.theme import current_style_sheet, theme_color
+from src.app.window_geometry import fit_dialog_to_available_screen
+from src.features.allocation.save_progress import AllocationSaveProgress
+from src.features.allocation.slot_plan_diff import selected_slot_plan_diff
+from src.features.inventory.equipment_display_controller import invalidate_saved_equipment_cache
+from src.services.allocation_lock_service import AllocationLockSnapshot
+from src.services.allocation_main_value_service import legacy_plan_tape_main_values
+from src.services.allocation_plan_save import save_allocation_plans
+from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
+from src.storage.sqlite.user_data_dao import UserDataDao
+from src.utils.logger import logger
+
+
+def show_allocation_save_success(parent, saved_count: int) -> None:
+    """Keep optional support inside the success dialog, without interrupting calculation."""
+
+    dialog = QDialog(parent)
+    dialog.setObjectName("allocationSaveSuccessDialog")
+    dialog.setWindowTitle("저장 완료")
+    dialog.setWindowModality(Qt.WindowModal)
+    dialog.setStyleSheet(current_style_sheet())
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(20, 16, 20, 14)
+    layout.setSpacing(10)
+    summary = QHBoxLayout()
+    summary.setSpacing(12)
+    mark = QLabel("✓", dialog)
+    mark.setObjectName("allocationSaveSuccessMark")
+    mark.setAlignment(Qt.AlignCenter)
+    mark.setFixedSize(34, 34)
+    mark.setStyleSheet(
+        f"background:{theme_color('#238636')};color:#fff;"
+        "border-radius:17px;font-size:20px;font-weight:700;"
+    )
+    summary.addWidget(mark)
+    text = QVBoxLayout()
+    text.setSpacing(2)
+    headline = QLabel(f"방안 {saved_count}개 저장 완료", dialog)
+    headline.setObjectName("allocationSaveSuccessHeadline")
+    headline.setStyleSheet(f"color:{theme_color('#f0f6fc')};font-size:16px;font-weight:700")
+    text.addWidget(headline)
+    detail = QLabel("캐릭터 및 장비 세팅 페이지에서 확인할 수 있습니다.", dialog)
+    detail.setStyleSheet(f"color:{theme_color('#8b949e')};font-size:12px")
+    text.addWidget(detail)
+    summary.addLayout(text, 1)
+    layout.addLayout(summary)
+    support = QLabel(
+        f'<a href="{SUPPORT_US_URL}" style="color:{theme_color("#58a6ff")};'
+        'text-decoration:underline;">계산기가 마음에 드셨나요? 후원해 주세요</a>',
+        dialog,
+    )
+    support.setObjectName("allocationSaveSupportLink")
+    support.setTextFormat(Qt.RichText)
+    support.setTextInteractionFlags(Qt.TextBrowserInteraction)
+    support.setOpenExternalLinks(True)
+    support.setFocusPolicy(Qt.StrongFocus)
+    support_row = QHBoxLayout()
+    support_row.addSpacing(46)
+    support_row.addWidget(support)
+    support_row.addStretch()
+    layout.addLayout(support_row)
+    layout.addSpacing(12)
+    actions = QHBoxLayout()
+    actions.addStretch()
+    confirm = QPushButton("확인", dialog)
+    confirm.setDefault(True)
+    confirm.clicked.connect(dialog.accept)
+    actions.addWidget(confirm)
+    layout.addLayout(actions)
+    fit_dialog_to_available_screen(dialog, QSize(390, 164))
+    QApplication.beep()
+    dialog.exec()
+
+
+def save_allocation(owner, *, show_message=True):
+    from src.features.allocation.runner import (
+        _allocation_paths, _select_allocation_save_slots, _role_state_from_plan,
+        _persistable_plan_diff, _plan_changed_uids, _plan_assignment_scores,
+    )
+
+    if not owner.final_plan or getattr(owner, "_saving", False):
+        return False
+    calculation = getattr(owner, "_worker", None)
+    if calculation is not None and calculation.isRunning():
+        return False
+    owner._saving = True
+    button = getattr(owner, "btn_save", None)
+    old_text = button.text() if button is not None else ""
+    old_enabled = button.isEnabled() if button is not None else False
+    if button is not None:
+        button.setEnabled(False)
+        button.setText("저장하는 중…")
+        button.repaint()
+    dialog = None
+    saved_count = 0
+    context = owner.app_context
+    generation = context.generation
+    cancel_event = owner._cancel_event
+    cancel_event.clear()
+    started = time.perf_counter()
+
+    def checkpoint():
+        if context.generation != generation or cancel_event.is_set():
+            raise CancelledError("저장이 취소되었거나 계정 컨텍스트가 더 이상 유효하지 않습니다")
+
+    try:
+        database_path, _, _, _, static_path = _allocation_paths(owner)
+        snapshot_id = owner._pending_allocation_snapshot_id
+        identity = owner._pending_allocation_static_identity
+        lock_snapshot = owner._allocation_lock_snapshot
+        if snapshot_id is None or not isinstance(identity, tuple) or len(identity) != 3:
+            raise RuntimeError("이번 계산에 동결된 가방 또는 정적 데이터셋이 없습니다. 계산을 다시 실행하세요.")
+        if not isinstance(lock_snapshot, AllocationLockSnapshot) or lock_snapshot.inventory_snapshot_id != snapshot_id:
+            raise RuntimeError("이번 계산에 일관된 장비 세팅 잠금 스냅샷이 없습니다. 계산을 다시 실행하세요.")
+        with UserDataDao(database_path) as user_dao, StaticGameDataDao(static_path) as static_dao:
+            targets = _select_allocation_save_slots(owner, user_dao, static_dao, snapshot_id)
+            if targets is None:
+                return False
+        # The plan is owned by this save operation until the modal worker finishes.
+        source_plans = owner.final_plan
+        strategy = owner._pending_strat
+        combo_limit = owner._pending_blueprint_combo_limit
+
+        def prepare_and_save(progress):
+            checkpoint()
+            plans = deepcopy(source_plans)
+            with UserDataDao(database_path) as user_dao:
+                diffs = selected_slot_plan_diff(user_dao, plans, targets)
+            rows = []
+            for role, plan in plans.items():
+                if not isinstance(plan, dict) or not plan.get("valid"):
+                    continue
+                character_id, slot_id = targets[role]
+                diff = diffs.get(role, {})
+                rows.append(dict(
+                    role_name=role, role_state=_role_state_from_plan(plan), character_id=character_id,
+                    snapshot_id=snapshot_id, name=f"계산 방안: {role}", score=float(plan.get("score", 0.0) or 0.0),
+                    slot_id=slot_id, payload={
+                        "schema": "allocation-official-snapshot-v1", "source": "allocation",
+                        "source_role_name": role, "static_dataset_id": identity[1],
+                        "strategy": strategy,
+                        "blueprint_combo_limit": combo_limit,
+                        "last_diff": _persistable_plan_diff(diff),
+                        "changed_uids": sorted(_plan_changed_uids(plan, diff)),
+                        "assignment_scores": _plan_assignment_scores(role, plan),
+                        "tape_main_values": legacy_plan_tape_main_values(plan),
+                    },
+                ))
+            if not rows:
+                raise RuntimeError("이번 계산에는 저장할 수 있는 유효한 방안이 없습니다.")
+            checkpoint()
+            count = save_allocation_plans(
+                database_path=database_path, static_database_path=static_path,
+                static_identity=identity, lock_snapshot=lock_snapshot, rows=rows,
+                checkpoint=checkpoint, progress=progress,
+            )
+            return count, plans, diffs, len(rows)
+
+        dialog = AllocationSaveProgress(owner.dialog_parent)
+        saved_count, plans, diffs, row_count = dialog.run(prepare_and_save, owner)
+        if context.generation != generation:
+            return False
+        owner.allocation_plan_diff = diffs
+        owner._allocation_dirty = False
+        # Role/equipment pages refresh through navigation when the user opens them.
+        # Rebuilding both off-screen pages here used to freeze the save dialog.
+        invalidate_saved_equipment_cache(owner.dialog_parent)
+        dialog.set_stage(("계산 결과를 업데이트하는 중…", row_count + 1, row_count + 2))
+        owner._render_results(plans)
+        dialog.set_stage(("저장 완료", row_count + 2, row_count + 2))
+        dialog.close()
+        logger.info(f"allocation_save_complete roles={saved_count} elapsed_ms={(time.perf_counter() - started) * 1000:.1f}")
+        if show_message:
+            show_allocation_save_success(owner.dialog_parent, saved_count)
+        return True
+    except CancelledError:
+        return False
+    except Exception as error:
+        if dialog is not None:
+            dialog.close()
+        if saved_count:
+            QMessageBox.warning(owner.dialog_parent, "방안 저장됨", f"페이지 새로 고침에 실패했습니다. 페이지에 다시 들어가 주세요.\n{error}")
+            return True
+        QMessageBox.critical(owner.dialog_parent, "저장 실패", str(error))
+        return False
+    finally:
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+        owner._saving = False
+        if button is not None:
+            button.setText(old_text)
+            button.setEnabled(old_enabled)

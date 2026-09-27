@@ -5,18 +5,17 @@ AGPL-3.0 §5, §13 이행을 위한 고지입니다.
 ## 상류 저작물 / Upstream
 
 - 저장소: https://github.com/hxwd94666/NTE-Drive-Calc
-- 기준 커밋: `7b4293c` (버전 2.2.1 + 계산 오류 핫픽스)
+- 기준 커밋: `d3eca80` (버전 2.3.0)
 - 저작권: NTE Drive Calc contributors
 - 라이선스: GNU Affero General Public License v3.0 ([LICENSE](LICENSE))
 
 기준 커밋은 임의로 고른 것이 아닙니다. 배포된 실행 파일의 PYZ 아카이브에서 모든 `src.*` 모듈의
-바이트코드를 추출해 후보 커밋들과 구조 비교한 결과, **692개 모듈 전부가 `7b4293c`와 일치**했습니다
-(초기 2.2.1 릴리스 `e09cf84`는 691개 중 1개가 어긋납니다). 공식 2.2.1 은 계산 오류 핫픽스로 한 번
-교체되었으므로, 재현하실 때는 반드시 이 커밋을 사용하세요.
+바이트코드를 추출해 후보 커밋들과 구조 비교한 결과, **820개 모듈 전부가 `d3eca80`과 일치**했습니다.
+공식 빌드가 태그와 다른 커밋에서 나온 전례가 있으므로, 재현하실 때는 반드시 이 커밋을 사용하세요.
 
-*The baseline was not picked by hand: all 692 `src.*` modules in the released binary's PYZ match
-`7b4293c` bytecode-for-bytecode. The official 2.2.1 build was replaced once by a calculation-bug
-hotfix, so reproduce against this commit.*
+*The baseline was not picked by hand: all 820 `src.*` modules in the released binary's PYZ match
+`d3eca80` bytecode-for-bytecode. Official builds have shipped from commits other than the tag
+before, so reproduce against this exact commit.*
 
 ## 이 파생물의 변경 내용 / What this derivative changes
 

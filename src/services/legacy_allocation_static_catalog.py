@@ -14,8 +14,10 @@ from typing import Any
 
 from src.models.equipment import DriveShape
 from src.optimizer.scoring import ScoringEngine
+from src.services.advancement_stage_service import fork_active_panel_stats
 from src.services.sqlite_allocation_inventory import legacy_shape_id
 from src.services.character_shape_bonus_service import get_effective_character_shape_bonus
+from src.services.official_role_page_service import load_official_role_detail
 from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
 from src.storage.sqlite.user_data_dao import UserDataDao
 
@@ -99,19 +101,50 @@ def _likeability_crit_rate_bonus(
     )
 
 
+def _current_role_calculation_projection(
+    detail: dict[str, Any],
+) -> dict[str, Any]:
+    """Project current fork state without replacing workshop base weights."""
+
+    profile = detail.get("profile") or {}
+    fork_id = str(profile.get("fork_id") or "")
+    fork = next(
+        (
+            item for item in detail.get("forks") or ()
+            if str(item.get("fork_id") or "") == fork_id
+        ),
+        None,
+    )
+    fork_stats = fork_active_panel_stats(
+        fork,
+        int(profile.get("fork_level") or 1),
+        breakthrough_stage=profile.get("fork_breakthrough_stage"),
+        refinement_level=profile.get("fork_refinement_level"),
+    )
+    return {
+        "default_weapon": str((fork or {}).get("name_zh") or ""),
+        "active_fork_crit_rate_bonus": round(
+            max(0.0, float(fork_stats.get("CritBase") or 0.0)) * 100.0,
+            4,
+        ),
+    }
+
+
 def build_legacy_allocation_static_catalog(
     *, config_dir: str | Path, user_database_path: str | Path | None = None,
+    static_database_path: str | Path | None = None,
 ) -> LegacyAllocationStaticCatalog:
     """Build all old-solver inputs from the static and account SQLite databases."""
 
     scoring = ScoringEngine(
         config_dir=str(config_dir), user_database_path=user_database_path,
+        static_database_path=static_database_path,
     )
     roles_db: dict[str, dict[str, Any]] = {}
     sets_db: dict[str, dict[str, Any]] = {}
     shapes_db: dict[str, DriveShape] = {}
     board_matrices: dict[str, list[list[int]]] = {}
-    with StaticGameDataDao() as static_dao:
+    with StaticGameDataDao(static_database_path) as static_dao:
         characters = static_dao.list_role_template_characters()
         for suit in static_dao.list_suits():
             name = str(suit.get("name_zh") or suit["suit_id"])
@@ -146,6 +179,7 @@ def build_legacy_allocation_static_catalog(
             else None
         )
         try:
+            detail_cache: dict[object, Any] = {}
             for character in characters:
                 character_id = int(character["character_id"])
                 role_name = str(character.get("name_zh") or character_id)
@@ -171,12 +205,34 @@ def build_legacy_allocation_static_catalog(
                     str(graduation_template.get("fork_id") or ""),
                     "",
                 )
+                calculation_projection = None
+                if user_dao is not None:
+                    try:
+                        detail = load_official_role_detail(
+                            user_database_path,
+                            character_id,
+                            include_inventory_contexts=False,
+                            static_database_path=static_dao.database_path,
+                            request_cache=detail_cache,
+                        )
+                        calculation_projection = _current_role_calculation_projection(
+                            detail,
+                        )
+                    except (OSError, RuntimeError, ValueError):
+                        calculation_projection = None
+                if calculation_projection is not None:
+                    default_weapon = calculation_projection["default_weapon"]
                 roles_db[role_name] = {
                     "character_id": character_id,
                     "default_set": suit_name,
                     "default_weapon": default_weapon,
                     "likeability_crit_rate_bonus": _likeability_crit_rate_bonus(
                         static_dao, user_dao, character_id,
+                    ),
+                    "active_fork_crit_rate_bonus": (
+                        calculation_projection["active_fork_crit_rate_bonus"]
+                        if calculation_projection is not None
+                        else None
                     ),
                     "extra_shape_label": extra_shape_label,
                     "extra_shape_buffs": extra_shape_buffs,

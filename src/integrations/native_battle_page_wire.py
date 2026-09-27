@@ -22,7 +22,7 @@ def _dataclass_fields(cls):
 
 
 def decode(value: object, annotation: Any):
-    """Accept only the declared wire shape; unknowns stay None, never zero."""
+    """Read known fields from extensible objects; missing values never become zero."""
     origin, args = get_origin(annotation), get_args(annotation)
     if annotation is Any:
         return value
@@ -61,9 +61,6 @@ def decode(value: object, annotation: Any):
         if not isinstance(value, dict):
             raise NativeAnalysisError('분석 코어 결과 객체가 잘못되었습니다')
         declared = _dataclass_fields(annotation)
-        known = {field.name for field, _ in declared}
-        if value.keys() - known:
-            raise NativeAnalysisError('분석 코어 응답에 알 수 없는 필드가 있습니다')
         result = {}
         for field, typ in declared:
             if field.name not in value:
@@ -81,7 +78,7 @@ def decode_page(value: dict):
 
     required = {'analysis', 'target_catalog', 'target_catalog_error',
                 'marginal_benefits', 'marginal_panel', 'candidate_display_analysis'}
-    if not required <= value.keys() or value.keys() - required - {'derived_snapshot', 'hit_details'}:
+    if not isinstance(value, dict) or not required <= value.keys():
         raise NativeAnalysisError('분석 코어 페이지 응답 필드가 일치하지 않습니다')
     catalog = value['target_catalog']
     if catalog is not None and not isinstance(catalog, dict):
@@ -89,8 +86,8 @@ def decode_page(value: dict):
     if value['target_catalog_error'] is not None:
         raise NativeAnalysisError('분석 코어 대상 목록 읽기 실패')
     from src.integrations.native_battle_hit_details_wire import decode_hit_details
-    analysis = decode(value['analysis'], BattleAnalysisSnapshot | None)
-    candidate = decode(value['candidate_display_analysis'], BattleAnalysisSnapshot | None)
+    analysis = _decode_snapshot(value['analysis'])
+    candidate = _decode_snapshot(value['candidate_display_analysis'])
     return BattleReportAnalysisLoadResult(
         analysis=analysis,
         target_catalog=catalog,
@@ -101,24 +98,47 @@ def decode_page(value: dict):
     )
 
 
+def _decode_snapshot(value):
+    """Restore explicit same-event wire references before typed display decoding."""
+    if isinstance(value, dict):
+        selected = {hit.get('event_id'): hit.get('native_evidence')
+                    for hit in value.get('hits', ()) if isinstance(hit, dict)}
+        timeline = []
+        for hit in value.get('timeline_hits', ()):
+            evidence = hit.get('native_evidence') if isinstance(hit, dict) else None
+            if isinstance(evidence, dict) and 'reference_event_id' in evidence:
+                identifier = evidence['reference_event_id']
+                if ('payload_json' in evidence or not isinstance(identifier, str)
+                        or identifier != hit.get('event_id')
+                        or not isinstance(selected.get(identifier), dict)
+                        or 'payload_json' not in selected[identifier]):
+                    raise NativeAnalysisError('분석 코어 네이티브 증거 참조가 유효하지 않음')
+                hit = {**hit, 'native_evidence': selected[identifier]}
+            timeline.append(hit)
+        value = {**value, 'timeline_hits': timeline}
+    return decode(value, BattleAnalysisSnapshot | None)
+
+
 def decode_derived_snapshot(value: object, *, battle_record_id: int, dataset_version: str):
     """Validate native persistence metadata without rebuilding its inferred payload."""
     from src.services.battle_inferred_target_condition_service import (
-        BattleInferredEncounter, INFERRED_ENCOUNTER_ALGORITHM_VERSION,
+        BattleInferredEncounter,
     )
     if value is None:
         return None
     string_fields = ('algorithm_version', 'static_dataset_id', 'inference_status',
                      'environment_kind', 'environment_ref', 'environment_name', 'source_kind', 'confidence')
-    if (not isinstance(value, dict) or set(value) != {
-            'battle_record_id', 'payload_schema_version', 'static_schema_version', 'inferred_payload',
-            *string_fields}
+    required = {'battle_record_id', 'payload_schema_version', 'static_schema_version',
+                'inferred_payload', *string_fields}
+    if (not isinstance(value, dict) or not required <= value.keys()
             or any(type(value[key]) is not str for key in string_fields)
             or type(value['battle_record_id']) is not int or value['battle_record_id'] != battle_record_id
             or type(value['payload_schema_version']) is not int or value['payload_schema_version'] != 1
             or type(value['static_schema_version']) is not int or value['static_schema_version'] <= 0
             or value['static_dataset_id'] != dataset_version
-            or value['algorithm_version'] != INFERRED_ENCOUNTER_ALGORITHM_VERSION
+            # Algorithm revisions belong to the native producer. Wire compatibility
+            # is defined by payload_schema_version, not the legacy Python algorithm.
+            or not value['algorithm_version'].strip()
             or value['inference_status'] != 'resolved'):
         raise NativeAnalysisError('분석 코어 파생 스냅샷의 식별 정보 또는 버전이 잘못되었습니다')
     inferred = decode(value['inferred_payload'], BattleInferredEncounter)
@@ -126,4 +146,4 @@ def decode_derived_snapshot(value: object, *, battle_record_id: int, dataset_ver
             'algorithm_version', 'environment_kind', 'environment_ref', 'environment_name',
             'source_kind', 'confidence')):
         raise NativeAnalysisError('분석 코어 파생 스냅샷 내용이 메타데이터와 일치하지 않습니다')
-    return value
+    return {key: value[key] for key in required}

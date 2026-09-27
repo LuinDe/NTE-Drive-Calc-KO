@@ -25,7 +25,7 @@ from src.optimizer.contracts import (
     EQUIP_DISPLAY_NAME,
     EQUIP_SET_NAME,
     EQUIP_UID,
-    ROLE_EQUIPPED_DRIVES,
+    ROLE_EQUIPPED_TAPE,
 )
 from src.features.inventory.equipment_display_context import equipment_presentation
 from src.features.inventory.equipment_loadout_scoring import (
@@ -185,7 +185,7 @@ def _clear_all_equipment(self):
                 skipped_locked.append(f"{role_name} · {slot_name}")
                 continue
             dao.deactivate_loadout_plan(plan["plan_id"])
-    self._saved_equipment_cache_valid = False
+    self.invalidate_saved_equipment_cache()
     self._refresh_equip()
     if skipped_locked:
         QMessageBox.information(
@@ -200,6 +200,8 @@ def invalidate_saved_equipment_cache(self: Any) -> None:
     """Public cross-feature hook after a persisted loadout mutation."""
 
     self._saved_equipment_cache_valid = False
+    # A read started before the mutation must not publish an obsolete cache.
+    self._equip_load_token = object()
 
 
 def reset_equipment_account_state(self: Any) -> None:
@@ -211,6 +213,29 @@ def reset_equipment_account_state(self: Any) -> None:
     self._saved_equipment_states = {}
     self._game_loadout_states = {}
     self._equip_selected_role_by_mode = {}
+
+
+def _slot_suit_names(states: Any, slot_id: int) -> tuple[str, ...]:
+    """Read the equipped core suit from flat or role-grouped display states."""
+
+    pending = list((states or {}).values()) if isinstance(states, dict) else []
+    while pending:
+        state = pending.pop(0)
+        if not isinstance(state, dict):
+            continue
+        pending.extend(
+            child
+            for child in (state.get("_role_slot_states") or ())
+            if isinstance(child, dict)
+        )
+        if state.get("_loadout_slot_id") != slot_id:
+            continue
+        tape = state.get(ROLE_EQUIPPED_TAPE)
+        if not isinstance(tape, dict):
+            return ()
+        suit_name = str(tape.get(EQUIP_SET_NAME) or "").strip()
+        return (suit_name,) if suit_name else ()
+    return ()
 
 
 def refresh_saved_equipment_after_mutation(
@@ -257,7 +282,7 @@ def _delete_role_equipment(
     except Exception as exc:
         QMessageBox.warning(self, "캐릭터 장비 세팅 삭제", str(exc))
         return
-    self._saved_equipment_cache_valid = False
+    self.invalidate_saved_equipment_cache()
     self._refresh_equip()
     logger.success(f"캐릭터 장비 세팅 삭제됨: {role_name}")
 
@@ -329,21 +354,11 @@ def _manage_loadout_slot(
         return str(slot["slot_name"])
 
     def slot_suit_text(slot: dict[str, Any]) -> str:
-        slot_state = next(
-            (
-                state
-                for state in (getattr(self, "_saved_equipment_states", {}) or {}).values()
-                if isinstance(state, dict)
-                and state.get("_loadout_slot_id") == slot["slot_id"]
-            ),
-            {},
+        suit_names = _slot_suit_names(
+            getattr(self, "_saved_equipment_states", {}),
+            int(slot["slot_id"]),
         )
-        suit_names = {
-            str(drive.get(EQUIP_SET_NAME)).strip()
-            for drive in slot_state.get(ROLE_EQUIPPED_DRIVES, ()) or ()
-            if isinstance(drive, dict) and str(drive.get(EQUIP_SET_NAME) or "").strip()
-        }
-        return f"세트: {' / '.join(sorted(suit_names))}" if suit_names else "세트: 미장착"
+        return f"세트: {' / '.join(suit_names)}" if suit_names else "세트: 미장착"
 
     def selected_slot() -> dict[str, Any] | None:
         selected_id = selector.currentData()
@@ -583,7 +598,7 @@ def _import_game_loadout(self: Any, role_name: str) -> None:
         return
     logger.info(f"게임 내 장비 세팅 가져옴 role={role_name}, plan_id={plan_id}")
     QMessageBox.information(self, "게임 내 방안 가져오기", f"[{role_name}]을(를) 계산기 장비 세팅 방안으로 가져왔습니다.")
-    self._saved_equipment_cache_valid = False
+    self.invalidate_saved_equipment_cache()
     self._refresh_equip(restore_role_name=role_name)
 
 
@@ -649,7 +664,7 @@ def _import_all_game_loadouts(self: Any) -> None:
     if locked_count:
         message += f"\n캐릭터 {locked_count}명은 방안이 잠겨 있어 건너뛰었습니다."
     QMessageBox.information(self, "원클릭 가져오기", message)
-    self._saved_equipment_cache_valid = False
+    self.invalidate_saved_equipment_cache()
     self._refresh_equip()
 
 

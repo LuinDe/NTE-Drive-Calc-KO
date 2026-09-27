@@ -4,10 +4,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from src.domain.progression_material_conversion import allocate_owned, lower_tier_ids
+from src.domain.progression_stamina import (
+    FarmingStage,
+    ProgressionStaminaResult,
+)
+from src.domain.role_name_order import role_name_sort_key
 
 from src.services.character_progression_requirements import (
     CharacterLevelMaterialProjection,
@@ -16,6 +23,20 @@ from src.services.character_progression_requirements import (
     ProgressionRequirementGap,
     project_character_level_requirements,
     project_skill_level_requirements,
+)
+from src.services.fork_progression_requirements import (
+    ForkLevelMaterialProjection,
+    project_fork_level_requirements,
+)
+from src.services.cultivation_stamina_planner import (
+    calculate_stamina_result,
+    normalize_owned_quantities,
+    stamina_material_ids,
+)
+from src.services.cultivation_legacy_gold_projection import (
+    correct_legacy_costs,
+    correct_legacy_stages,
+    has_legacy_gold_alias,
 )
 from src.services.static_catalog_character_models import (
     CharacterBreakthroughRequirement,
@@ -33,6 +54,7 @@ from src.storage.sqlite.static_catalog_character_queries import (
 )
 from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
 from src.storage.sqlite.user_data_dao import UserDataDao
+from src.services.native_role_profile_projection import load_template_growth_defaults, project_native_role_profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +131,8 @@ class CultivationMaterial:
     item_id: str
     name: str
     quantity: int
+    quality: str | None = None
+    icon_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +153,22 @@ class CultivationPlan:
     included_breakthrough_stages: tuple[int, ...]
     gaps: tuple[ProgressionRequirementGap, ...]
     fork_required_experience: int = 0
+    fork_experience_overflow: int = 0
+    fork_included_breakthrough_stages: tuple[int, ...] = ()
+    owned_inputs: tuple[CultivationMaterial, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CultivationSectionStamina:
+    label: str
+    result: ProgressionStaminaResult
+
+
+@dataclass(frozen=True, slots=True)
+class CultivationStaminaPlan:
+    total: ProgressionStaminaResult
+    sections: tuple[CultivationSectionStamina, ...]
+    stamina_item_ids: frozenset[str] = frozenset()
 
 
 class CultivationPlannerService:
@@ -150,7 +190,7 @@ class CultivationPlannerService:
         self._user_dao_factory = user_dao_factory
 
     def list_roles(self) -> tuple[CultivationRole, ...]:
-        """Return every role that has a formal catalog entry, sorted by catalog order."""
+        """Return formal roles in first-character A–Z order for both pickers."""
 
         queries = self._character_queries_factory(self._static_database_path)
         try:
@@ -306,14 +346,39 @@ class CultivationPlannerService:
                         None,
                     ))
             fork_required_experience = 0
+            fork_experience_overflow = 0
+            fork_included_stages: tuple[int, ...] = ()
             if request.fork is not None:
-                fork_sections, fork_experience = self._fork_sections(request.fork)
+                fork_sections, fork_projection = self._fork_sections(request.fork)
                 sections.extend(fork_sections)
-                fork_required_experience = fork_experience
+                gaps.extend(fork_projection.gaps)
+                fork_required_experience = fork_projection.required_experience
+                fork_experience_overflow = fork_projection.experience_overflow
+                fork_included_stages = (
+                    fork_projection.included_breakthrough_stages
+                )
+            if has_legacy_gold_alias(terminology_dao):
+                sections = [
+                    (label, correct_legacy_costs(requirements), description)
+                    for label, requirements, description in sections
+                ]
+            item_ids = tuple(dict.fromkeys(
+                item.item_id
+                for _label, requirements, _description in sections
+                for item in requirements
+            ))
+            input_ids = tuple(dict.fromkeys((
+                *item_ids,
+                *(lower for item_id in item_ids for lower in lower_tier_ids(item_id)),
+            )))
+            item_metadata = {
+                str(row["item_id"]): row
+                for row in terminology_dao.list_progression_items(input_ids)
+            }
             rendered_sections = tuple(
                 CultivationSection(
                     label,
-                    self._materials(requirements, terminology),
+                    self._materials(requirements, terminology, item_metadata),
                     description,
                 )
                 for label, requirements, description in sections
@@ -325,6 +390,16 @@ class CultivationPlannerService:
             totals = self._materials(
                 tuple(CharacterMaterialRequirement(item_id, quantity) for item_id, quantity in merged.items()),
                 terminology,
+                item_metadata,
+            )
+            owned_inputs = self._materials(
+                tuple(
+                    CharacterMaterialRequirement(item_id, merged.get(item_id, 0))
+                    for item_id in input_ids
+                    if item_id in item_metadata or item_id in merged
+                ),
+                terminology,
+                item_metadata,
             )
             status = _plan_status(gaps, totals)
             return CultivationPlan(
@@ -337,9 +412,62 @@ class CultivationPlannerService:
                 included_breakthrough_stages=stages,
                 gaps=tuple(gaps),
                 fork_required_experience=fork_required_experience,
+                fork_experience_overflow=fork_experience_overflow,
+                fork_included_breakthrough_stages=fork_included_stages,
+                owned_inputs=owned_inputs,
             )
         finally:
             terminology_dao.close()
+
+    def calculate_stamina(
+        self,
+        plan: CultivationPlan,
+        *,
+        owned_quantities: Mapping[str, int],
+        hunter_level: int,
+        effective_identification_level: int | None,
+    ) -> CultivationStaminaPlan:
+        """Calculate merged and per-section stamina from one frozen static dataset."""
+
+        stages = self.load_farming_stages()
+        normalized_owned = normalize_owned_quantities(owned_quantities)
+        total = calculate_stamina_result(
+            plan.totals,
+            normalized_owned,
+            stages,
+            hunter_level=hunter_level,
+            effective_identification_level=effective_identification_level,
+        )
+        available = dict(normalized_owned)
+        section_results: list[CultivationSectionStamina] = []
+        for section in plan.sections:
+            allocated = allocate_owned(
+                {material.item_id: material.quantity for material in section.materials},
+                available,
+            )
+            section_results.append(CultivationSectionStamina(
+                section.label,
+                calculate_stamina_result(
+                    section.materials,
+                    allocated,
+                    stages,
+                    hunter_level=hunter_level,
+                    effective_identification_level=effective_identification_level,
+                ),
+            ))
+        return CultivationStaminaPlan(
+            total, tuple(section_results), stamina_material_ids(stages)
+        )
+
+    def load_farming_stages(self) -> tuple[FarmingStage, ...]:
+        """Freeze the deterministic farming-stage dataset for one calculation."""
+
+        dao = self._terminology_dao_factory(self._static_database_path)
+        try:
+            stages = tuple(dao.list_progression_farming_stages())
+            return correct_legacy_stages(stages) if has_legacy_gold_alias(dao) else stages
+        finally:
+            dao.close()
 
     def _load_detail(self, character_id: int) -> CharacterDetail:
         queries = self._character_queries_factory(self._static_database_path)
@@ -354,7 +482,14 @@ class CultivationPlannerService:
     def _load_profile(self, character_id: int) -> dict[str, object] | None:
         dao = self._user_dao_factory(self._user_database_path)
         try:
-            return dao.get_character_profile(int(character_id))
+            profile = dao.get_character_profile(int(character_id))
+            observation = dao.get_native_character_profile_observation(int(character_id))
+            if observation is None:
+                return profile
+            base = profile if profile is not None else load_template_growth_defaults(
+                (int(character_id),), static_database_path=self._static_database_path,
+            )[int(character_id)]
+            return project_native_role_profile(base, observation, persisted=profile is not None)
         finally:
             dao.close()
 
@@ -392,7 +527,10 @@ class CultivationPlannerService:
     def _fork_sections(
         self,
         target: CultivationForkTarget,
-    ) -> tuple[list[tuple[str, tuple[CharacterMaterialRequirement, ...], str | None]], int]:
+    ) -> tuple[
+        list[tuple[str, tuple[CharacterMaterialRequirement, ...], str | None]],
+        ForkLevelMaterialProjection,
+    ]:
         detail = self._load_fork_detail(target.fork_id)
         _validate_fork_state(
             target.current_level,
@@ -408,11 +546,7 @@ class CultivationPlannerService:
             target.current_level, target.current_breakthrough_stage,
         ):
             raise ValueError("아크 목표 육성은 현재 육성보다 낮을 수 없습니다")
-        experience = sum(
-            item.need_exp for item in detail.growth_levels
-            if target.current_level < item.level <= target.target_level
-        )
-        stages, included = _fork_breakthrough_requirements(
+        projection = project_fork_level_requirements(
             detail,
             current_level=target.current_level,
             current_stage=target.current_breakthrough_stage,
@@ -420,15 +554,30 @@ class CultivationPlannerService:
             target_stage=target.target_breakthrough_stage,
         )
         sections: list[tuple[str, tuple[CharacterMaterialRequirement, ...], str | None]] = []
-        if experience:
+        upgrade_requirements = (
+            *projection.experience_materials,
+            *projection.experience_costs,
+        )
+        if projection.required_experience:
             sections.append((
                 f"아크 · {detail.summary.name_zh} · 레벨업",
-                (),
-                f"레벨업 경험치 {experience:,}. 현재 정식 정적 라이브러리에 아크 경험치 재료 규격이 없어 재료로 환산하지 않았습니다.",
+                upgrade_requirements,
+                (
+                    f"레벨업 경험치 {projection.required_experience:,};"
+                    f"재료 초과분 경험치 {projection.experience_overflow:,}."
+                ),
             ))
-        if stages:
-            sections.append((f"아크 · {detail.summary.name_zh} · 돌파", stages, None))
-        return sections, experience
+        breakthrough_requirements = (
+            *projection.breakthrough_materials,
+            *projection.breakthrough_costs,
+        )
+        if breakthrough_requirements:
+            sections.append((
+                f"아크 · {detail.summary.name_zh} · 돌파",
+                breakthrough_requirements,
+                None,
+            ))
+        return sections, projection
 
     @staticmethod
     def _validate_character_interval(
@@ -446,6 +595,7 @@ class CultivationPlannerService:
     def _materials(
         requirements: tuple[CharacterMaterialRequirement, ...],
         terminology: StaticCatalogTerminologyService,
+        metadata: dict[str, dict[str, object]],
     ) -> tuple[CultivationMaterial, ...]:
         totals: dict[str, int] = defaultdict(int)
         for item in requirements:
@@ -453,10 +603,13 @@ class CultivationPlannerService:
         items = []
         for item_id, quantity in totals.items():
             term = terminology.resolve("item", item_id, context="progression")
+            item = metadata.get(item_id, {})
             items.append(CultivationMaterial(
                 item_id=item_id,
-                name=term.display_name or item_id,
+                name=term.display_name or str(item.get("name_zh") or item_id),
                 quantity=quantity,
+                quality=(str(item["quality"]) if item.get("quality") else None),
+                icon_path=(str(item["icon_path"]) if item.get("icon_path") else None),
             ))
         return tuple(sorted(items, key=lambda item: (item.name, item.item_id)))
 
@@ -589,7 +742,7 @@ def _skill_category(skill: CharacterSkill) -> str:
 
 
 def _canonical_fork_item_id(item_id: str) -> str:
-    return "Fons" if str(item_id) == "gold" else str(item_id)
+    return "Gold" if str(item_id) == "gold" else str(item_id)
 
 
 def _deduplicate_roles(roles: Iterable[CultivationRole]) -> tuple[CultivationRole, ...]:
@@ -605,7 +758,7 @@ def _deduplicate_roles(roles: Iterable[CultivationRole]) -> tuple[CultivationRol
         character_ids.add(role.character_id)
         names.add(name)
         result.append(role)
-    return tuple(result)
+    return tuple(sorted(result, key=lambda role: (role_name_sort_key(role.name), role.character_id)))
 
 
 def _skill_level(value: object, skill: CharacterSkill) -> int:
@@ -624,5 +777,6 @@ def _plan_status(
 __all__ = [
     "CultivationFork", "CultivationForkSeed", "CultivationForkTarget", "CultivationMaterial",
     "CultivationPlan", "CultivationPlannerService", "CultivationRequest", "CultivationRole",
+    "CultivationSectionStamina", "CultivationStaminaPlan",
     "CultivationSection", "CultivationSeed", "CultivationSkill", "CultivationSkillTarget",
 ]

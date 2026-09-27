@@ -17,6 +17,14 @@ def _official_pack_key(value: object) -> str:
 
 class StaticGameDataExtendedQueriesMixin(ForkPermanentPropertyProjectionMixin):
 
+    def get_catalog_scope(self) -> str:
+        if not self._one("SELECT 1 FROM sqlite_master WHERE name = 'dataset_scope'"):
+            return "game"
+        rows = self._rows("SELECT scope FROM dataset_scope")
+        if len(rows) != 1 or rows[0]["scope"] not in {"game", "role_page", "reference"}:
+            raise ValueError("정적 카탈로그의 용도 선언이 유효하지 않습니다")
+        return str(rows[0]["scope"])
+
     def list_forks(self) -> list[dict[str, Any]]:
         rows = self._rows(
             """
@@ -708,3 +716,11 @@ class StaticGameDataExtendedQueriesMixin(ForkPermanentPropertyProjectionMixin):
             (int(character_id),),
         )
         return bonus
+
+    def get_character_likeability_identity(self, character_id: int) -> dict[str, Any] | None:
+        """Use the source row key, including official alternate character IDs."""
+        return self._one(
+            "SELECT r.row_key AS likeability_id, b.required_level "
+            "FROM character_likeability_bonus b JOIN source_row r USING(source_row_id) "
+            "WHERE b.character_id = ?", (int(character_id),),
+        )

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt
@@ -30,6 +29,7 @@ from src.features.inventory.equipment_plan_renderer import (
 )
 from src.optimizer.contracts import DIFF_CHANGED, ROLE_LAST_DIFF, ROLE_TOTAL_SCORE
 from src.services.game_ui_asset_catalog import GameUiAssetCatalog
+from src.ui.role_portrait import custom_role_portrait
 from src.ui.widgets import match_pinyin
 
 
@@ -129,19 +129,35 @@ def _clear_layout(layout: QLayout) -> None:
 
 def _asset_catalog(window: Any) -> GameUiAssetCatalog | None:
     context = getattr(window, "app_context", None)
-    asset_dir = (
-        getattr(getattr(context, "paths", None), "asset_dir", None)
-        if context is not None
-        else getattr(window, "asset_dir", None)
-    )
-    if asset_dir is None:
-        return None
-    return GameUiAssetCatalog(Path(asset_dir) / "game_ui")
+    paths = getattr(context, "paths", None)
+    reference_root = getattr(paths, "equipment_allocation_asset_root", None)
+    if reference_root is not None:
+        return GameUiAssetCatalog(reference_root)
+    asset_root = getattr(window, "game_ui_asset_root", None)
+    return GameUiAssetCatalog(asset_root) if asset_root is not None else None
 
 
 def _role_status(state: dict[str, Any]) -> str:
     score = float(state.get(ROLE_TOTAL_SCORE) or 0.0)
     return f"점수 {score:.1f}"
+
+
+def _equipment_role_icon(
+    state: dict[str, Any],
+    catalog: GameUiAssetCatalog | None,
+    device_pixel_ratio: float,
+) -> QIcon:
+    """Resolve a saved custom role's shared portrait before official assets."""
+
+    if state.get("_is_custom_role"):
+        return QIcon(custom_role_portrait(42, device_pixel_ratio))
+    character_id = state.get("_character_id")
+    icon_path = (
+        catalog.character_icon(int(character_id))
+        if catalog is not None and character_id is not None
+        else None
+    )
+    return QIcon(str(icon_path)) if icon_path is not None else QIcon()
 
 
 def sorted_equipment_role_states(
@@ -458,14 +474,7 @@ def show_equipment_master_detail(
         button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         display_name = str(state.get("_display_name") or role_name)
         button.setText(f"{display_name}\n{_role_status(state)}")
-        character_id = state.get("_character_id")
-        icon_path = (
-            catalog.character_icon(int(character_id))
-            if catalog is not None and character_id is not None
-            else None
-        )
-        if icon_path is not None:
-            button.setIcon(QIcon(str(icon_path)))
+        button.setIcon(_equipment_role_icon(state, catalog, button.devicePixelRatioF()))
         slot_id = state.get("_loadout_slot_id")
         if slot_id is not None:
             manage_button = QToolButton(button)

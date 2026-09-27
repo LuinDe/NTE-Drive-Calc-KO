@@ -201,7 +201,7 @@ class ForkCatalogProvider:
             ) or "패널 수정 없음"
             fields.append(official(
                 f"단계 {row.stage} · 상한 Lv.{row.max_fork_level}",
-                f"재료: {item_costs}; 폰스: {gold_costs}; 패널: {modifiers}",
+                f"재료: {item_costs}; 화폐 소모: {gold_costs}; 패널: {modifiers}",
             ))
         for state in detail.critical_level_states:
             fields.append(derived(
@@ -226,7 +226,7 @@ class ForkCatalogProvider:
                             f"{parameter.name_id}={parameter.display_value}"
                             for parameter in row.parameters
                         ) or "없음"),
-                        "폰스 필드:" + (row.need_gold_raw or "비어 있음"),
+                        "원본 need_gold 필드:" + (row.need_gold_raw or "비어 있음"),
                         "Buff:" + (", ".join(row.buff_asset_paths) or "없음"),
                     ]),
                 )

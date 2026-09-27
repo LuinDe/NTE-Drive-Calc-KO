@@ -8,9 +8,12 @@ from queue import Empty, SimpleQueue
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QProgressDialog
 
 from src.utils.logger import logger
+from src.features.input_operation_entry import show_input_unavailable
+
+
 
 
 def close_warehouse_state_progress(window: Any) -> None:
@@ -108,8 +111,4 @@ def on_warehouse_state_error(window: Any, error: str) -> None:
     close_warehouse_state_progress(window)
     window._set_warehouse_management_busy(False)
     logger.error(f"창고 상태 관리 실패: {error}")
-    QMessageBox.critical(
-        window,
-        "창고 관리 실패",
-        f"원클릭 폐기/잠금을 완료하지 못했습니다:\n{error}",
-    )
+    show_input_unavailable(window, "창고 상태 관리", str(error))

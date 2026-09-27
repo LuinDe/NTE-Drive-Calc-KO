@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from .account_data_dao import AccountDataDaoMixin
+from .all_item_snapshot_dao import AllItemSnapshotDaoMixin
 from .battle_report_dao import BattleReportDaoMixin
 from .battle_report_transfer_dao import BattleReportTransferDaoMixin
 from .battle_axis_dao import BattleAxisDaoMixin
@@ -19,6 +20,7 @@ from .loadout_plan_lock_dao import LoadoutPlanLockDaoMixin
 from .loadout_plan_dao import LoadoutPlanDaoMixin
 from .loadout_slot_dao import LoadoutSlotDaoMixin
 from .optimization_profile_dao import OptimizationProfileDaoMixin
+from .native_character_profile_dao import NativeCharacterProfileDaoMixin
 from .user_data_base import UserDataDaoCore
 from .user_data_support import (
     ALLOCATION_STRATEGIES,
@@ -38,6 +40,8 @@ from .user_data_support import (
 
 
 class UserDataDao(
+    AllItemSnapshotDaoMixin,
+    NativeCharacterProfileDaoMixin,
     CustomCharacterDaoMixin,
     AccountDataDaoMixin,
     BattleInferredTargetDaoMixin,

@@ -23,7 +23,7 @@ from src.services.advancement_stage_service import (
     select_fork_breakthrough,
 )
 from src.services.official_role_graduation_service import (
-    graduation_benchmark_damage,
+    graduation_rate,
     graduation_tooltip as _graduation_tooltip,
 )
 from src.services.official_role_page_service import (
@@ -137,7 +137,7 @@ def _calculation_detail(detail: dict, editor: dict) -> dict:
         for effect_id, check in awakening_checks.items()
         if check.isChecked()
     ]
-    profile["awakening_level"] = len(selected_awaken_effect_ids)
+    profile["awakening_level"] = editor["awakening_level"].value()
     profile["selected_awaken_effect_ids"] = selected_awaken_effect_ids
     profile["awakening_selection_initialized"] = True
     likeability = editor.get("likeability_level_10")
@@ -228,7 +228,7 @@ def _build_margin_group(
     layout = QVBoxLayout(group)
     state = {"margins": None, "initialized": False}
     header = QHBoxLayout()
-    graduation_label = QLabel("직접 피해 졸업률 : --")
+    graduation_label = QLabel("콘솔 직접 피해 졸업률 : --")
     graduation_label.setObjectName("officialRoleGraduationRate")
     graduation_label.setStyleSheet("font-weight:bold;color:#ffaa00;font-size:14px;")
     graduation_label.setToolTip(_graduation_tooltip(detail))
@@ -244,8 +244,6 @@ def _build_margin_group(
     table_layout = QVBoxLayout(table_host)
     table_layout.setContentsMargins(0, 0, 0, 0)
     layout.addWidget(table_host)
-    graduation_benchmark = graduation_benchmark_damage(detail)
-
     def refresh() -> None:
         calculation_detail = _calculation_detail(detail, editor)
         margin_context = str(editor.get("equipment_context_key") or "current")
@@ -269,9 +267,14 @@ def _build_margin_group(
             refresh_weights()
         _clear_layout(table_layout)
         damage = float((margins or {}).get("damage") or 0.0)
+        graduation_detail = {
+            **calculation_detail,
+            "property_weights": detail.get("property_weights") or {},
+            "main_property_weights": detail.get("main_property_weights") or {},
+        }
+        rate = graduation_rate(graduation_detail, margin_context)
         graduation_label.setText(
-            f"직접 피해 졸업률 : {damage / graduation_benchmark * 100:.1f}%"
-            if damage > 0 and graduation_benchmark else "직접 피해 졸업률 : --"
+            f"콘솔 직접 피해 졸업률 : {rate:.1f}%" if rate is not None else "콘솔 직접 피해 졸업률 : --"
         )
         damage_label.setText(f"직접 피해 점수 : {damage:.2f}" if margins else "직접 피해 점수 : --")
         if not margins:

@@ -25,10 +25,7 @@ def build_marginal_benefit_sections(
     root: QVBoxLayout,
 ) -> tuple[QTableWidget, QLabel, QWidget, QTableWidget, QLabel]:
     core_card, core_layout = analysis_section("콘솔 메인 속성 한계 이득 (금색 후보)")
-    core_note = QLabel(
-        "현재 임의 품질의 콘솔을 인식해 세트와 서브 스탯을 고정하고, 후보는 일괄 금색 만렙 메인 속성을 사용합니다."
-        "“메인 속성 없음 대비”는 일괄 비교용이고, “현재 교체”는 실제 장비 교체 결정용입니다."
-    )
+    core_note = QLabel("후보는 금색 만렙 메인 속성으로 비교합니다; 실제 장비 교체는 “현재 교체”를 확인하세요.")
     _style_note(core_note)
     core_layout.addWidget(core_note)
     core_notice = QLabel("백그라운드 계산 대기 중…")
@@ -60,10 +57,7 @@ def build_marginal_benefit_sections(
     fork_title.setObjectName("battleForkBenefitTitle")
     fork_title.setStyleSheet(themed_style("font-weight:bold;color:#58a6ff"))
     fork_layout.addWidget(fork_title)
-    fork_note = QLabel(
-        "A=아크 없음, B=아크 상시 패널만 복원, C=완전한 아크."
-        "상시=B-A, 스킬/메커니즘=C-B, 종합=C-A; 팀 Buff 표는 여전히 메커니즘 세부 내역이며 이 표와 합산하지 않습니다."
-    )
+    fork_note = QLabel("아크 상시 속성과 스킬 메커니즘 이득을 분리합니다; 파티 Buff 표와 중복해서 더하지 마세요.")
     _style_note(fork_note)
     fork_layout.addWidget(fork_note)
     fork_notice = QLabel("백그라운드 계산 대기 중…")
@@ -115,7 +109,14 @@ def _render_core(
     notice: QLabel,
     benefits: BattleMarginalBenefits,
 ) -> None:
-    rows = benefits.core_main_stats
+    rows = sorted(
+        benefits.core_main_stats,
+        key=lambda row: (
+            row.contribution.role_gain_percent is not None,
+            row.contribution.role_gain_percent or 0.0,
+        ),
+        reverse=True,
+    )
     table.setRowCount(len(rows))
     notice.setText(benefits.core_notice)
     notice.setVisible(bool(benefits.core_notice))
@@ -206,22 +207,23 @@ def _gain(status: QuantificationStatus, value: float | None) -> str:
         return "—"
     if status == "not_applicable":
         return "+0.00%"
-    text = f"{value:+.2f}%"
-    return f"{text} (부분)" if status == "partial" else text
+    return f"{value:+.2f}%"
 
 
-def _status(delta: BattleMarginalDelta) -> str:
+def _status(delta: BattleMarginalDelta, *, details: bool = False) -> str:
+    role = quantification_status_text(delta.role_status) if details or delta.role_status != "partial" else ""
+    team = quantification_status_text(delta.team_status) if details or delta.team_status != "partial" else ""
     return (
-        f"캐릭터 {quantification_status_text(delta.role_status)} "
+        f"캐릭터{role} "
         f"{delta.role_coverage_percent:.1f}% / "
-        f"팀 전체 {quantification_status_text(delta.team_status)} "
+        f"팀 전체{team} "
         f"{delta.team_coverage_percent:.1f}%"
     )
 
 
 def _delta_tooltip(label: str, delta: BattleMarginalDelta) -> str:
     gaps = "\n".join(f"- {line}" for line in delta.gap_explanations)
-    text = f"{label}: {_status(delta)}."
+    text = f"{label}：{_status(delta, details=True)}。"
     return text if not gaps else f"{text}\n누락된 의존 항목:\n{gaps}"
 
 

@@ -166,7 +166,7 @@ class SqliteAllocationInventory:
                 "아직 안정 가방 스냅샷이 없습니다. 먼저 홈에서 가방 동기화를 시작하고 게임에 접속하세요"
             )
         try:
-            _summary, snapshot_items = self.user_dao.export_inventory_snapshot(
+            summary, snapshot_items = self.user_dao.export_inventory_snapshot(
                 pinned_snapshot_id
             )
         except Exception as exc:
@@ -233,6 +233,8 @@ class SqliteAllocationInventory:
                         f"정적 데이터베이스에 코어 세트 {suit_id or '<empty>'}이(가) 없습니다"
                     )
                 main_stats = _stats(item.get("main_stats") or [])
+                if not main_stats and str(summary.get("source") or "") == "vision":
+                    continue
                 if len(main_stats) != 1:
                     raise AllocationInventoryProjectionError(
                         f"코어 {base['uid']}은(는) 메인 스탯을 정확히 하나 포함해야 합니다"
@@ -268,10 +270,11 @@ class SqliteAllocationInventory:
 def load_inventory_projection(
     database_path: str | Path,
     snapshot_id: int,
+    static_database_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """投影指定快照，供结果差异等历史方案展示使用。"""
 
-    with UserDataDao(database_path) as user_dao, StaticGameDataDao() as static_dao:
+    with UserDataDao(database_path) as user_dao, StaticGameDataDao(static_database_path) as static_dao:
         return [
             dict(item)
             for item in SqliteAllocationInventory(user_dao, static_dao).build(snapshot_id).items

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import traceback
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ _KEY_VALUE_SECRET = re.compile(
     r"(\s*[:=]\s*)([^,\s;&]+)"
 )
 _WINDOWS_PATH = re.compile(r"(?i)(?:[A-Z]:\\)(?:[^\\\r\n]+\\)*([^\\\r\n]+)")
+_URL = re.compile(r"https?://[^\s,;]+", re.IGNORECASE)
 
 
 def _sensitive_key(key: object) -> bool:
@@ -98,3 +100,28 @@ def safe_exception(error: BaseException) -> dict[str, str]:
         "error_type": type(error).__name__,
         "error_message": _sanitize_text(str(error)),
     }
+
+
+def sanitize_local_log_text(value: str) -> str:
+    """Keep local file paths for troubleshooting, but remove common credentials."""
+
+    sanitized = _BEARER.sub(f"Bearer {_REDACTED}", value)
+    sanitized = _KEY_VALUE_SECRET.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
+        sanitized,
+    )
+    return _URL.sub(lambda match: _sanitize_url(match.group(0)), sanitized)
+
+
+def format_local_exception(error: BaseException) -> str:
+    """Log a bounded exception and frame locations without source lines or locals."""
+
+    message = " ".join(sanitize_local_log_text(str(error)).split())[:1000]
+    frames = traceback.extract_tb(error.__traceback__)[-8:]
+    locations = " <- ".join(
+        f"{frame.filename}:{frame.lineno}:{frame.name}" for frame in frames
+    )
+    details = f"{type(error).__name__}: {message}"
+    if locations:
+        details += f" | stack={sanitize_local_log_text(locations)}"
+    return details

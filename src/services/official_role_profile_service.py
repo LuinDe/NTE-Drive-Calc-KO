@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from src.storage.sqlite.user_data_dao import UserDataDao
+from src.domain.native_role_sync import NativeRoleSyncResult
+from src.services.native_role_sync_validation import prepare_native_role_patches
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +37,13 @@ class OfficialRoleProfileService:
         user_database_path: str | Path,
         *,
         dao_factory: type[UserDataDao] = UserDataDao,
+        static_database_path: str | Path | None = None,
+        growth_defaults_loader: Callable[[tuple[int, ...]], Mapping[int, Mapping[str, int]]] | None = None,
     ) -> None:
         self._user_database_path = Path(user_database_path)
         self._dao_factory = dao_factory
+        self._growth_defaults_loader = growth_defaults_loader
+        self._static_database_path = Path(static_database_path).resolve() if static_database_path is not None else None
 
     def save_profiles(
         self, updates: Sequence[OfficialRoleProfileUpdate]
@@ -63,6 +69,23 @@ class OfficialRoleProfileService:
                     ordinal=update.ordinal,
                 )
         return len(updates)
+
+    def patch_native_profiles(
+        self, profiles: Sequence[Mapping[str, object]], *, check: Callable[[], None],
+    ) -> NativeRoleSyncResult:
+        """Apply observed cultivation with a final in-transaction context guard."""
+        check()
+        if self._growth_defaults_loader is None and self._static_database_path is None:
+            raise ValueError("캐릭터 상태 동기화에 이번에 동결된 정적 데이터베이스 경로가 없습니다")
+        patches, defaults, warnings = prepare_native_role_patches(
+            profiles, static_database_path=self._static_database_path,
+            growth_defaults_loader=self._growth_defaults_loader,
+        )
+        check()
+        with self._dao_factory(self._user_database_path) as dao:
+            result = dao.patch_native_character_profiles(patches, growth_defaults=defaults, check=check)
+        return NativeRoleSyncResult(result.saved_count, warnings + result.warnings)
+
 
     def reset_profile(self, character_id: int) -> None:
         with self._dao_factory(self._user_database_path) as dao:

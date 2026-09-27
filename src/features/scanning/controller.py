@@ -40,11 +40,11 @@ from src.features.scanning.hotkey_actions import (
     on_hotkey_stop as _on_hk_stop,
 )
 from src.features.scanning.scan_contracts import scanning_is_running as _scanning_is_running
+from src.features.scanning.entry_controls import open_scan_post_action_manager as _open_scan_post_action_manager
 from src.features.scanning.workflow import (
     _page_execute,
     _on_scan_change,
     _on_priority_changed,
-    _open_scan_post_action_manager,
     _do_exec,
     _start_vision_processing,
     _on_vision_progress,
@@ -126,9 +126,17 @@ class ScanningController(QObject):
         card_factory: Callable[..., Any],
         equipment_presentation: EquipmentPresentation,
         hotkey_manager: GlobalHotkeyManager,
+        operation_guard: Callable[[str], None] | None = None,
+        operation_generation: Callable[[], object] | None = None,
+        operation_entry: Callable[[str, str], bool] | None = None,
+        operation_unavailable: Callable[[str, str, str], None] | None = None,
     ) -> None:
         super().__init__(dialog_parent)
         self.app_context = app_context
+        self.operation_entry = operation_entry
+        self.operation_unavailable = operation_unavailable
+        self.operation_guard = operation_guard
+        self.operation_generation = operation_generation
         self.dialog_parent = dialog_parent
         self._minimize_window = minimize_window
         self._restore_window = restore_window
@@ -194,14 +202,14 @@ class ScanningController(QObject):
             role_selector=self.role_selector,
         )
         self._allocation_controller.bind_run_button(self.btn_run)
+        self._allocation_controller.bind_save_button(self.btn_save)
         return self._page
 
     def is_running(self) -> bool:
         return _scanning_is_running(self) or self._allocation_controller.is_running()
 
-    def stop(self) -> None:
-        """Stop account-bound capture/parse workers and release held input."""
-
+    def request_stop(self) -> None:
+        """Revoke active input/parse work without waiting on the GUI thread."""
         self._allocation_controller.cancel()
         self._stop_scan_hotkeys()
         for name in ("_scan_worker", "_gamepad_worker"):
@@ -210,15 +218,18 @@ class ScanningController(QObject):
             if scanner is not None:
                 if hasattr(scanner, "emergency_stop"):
                     scanner.emergency_stop()
-                else:
-                    scanner._stopped = True
-            if worker is not None and worker.isRunning():
-                worker.wait(5000)
         vision_worker = getattr(self, "_vision_worker", None)
         if vision_worker is not None and vision_worker.isRunning():
             if hasattr(vision_worker, "request_cancel"):
                 vision_worker.request_cancel()
-            vision_worker.wait(5000)
+
+    def stop(self) -> None:
+        """Stop account-bound workers, retaining the existing shutdown deadline."""
+        self.request_stop()
+        self._allocation_controller.stop_save()
+        for worker in (self._scan_worker, self._gamepad_worker, self._vision_worker):
+            if worker is not None and worker.isRunning():
+                worker.wait(5000)
 
     def close(self) -> None:
         self.stop()
@@ -381,3 +392,19 @@ class ScanningController(QObject):
 
     def _save_alloc(self, show_message: bool = True) -> bool:
         return self._allocation_controller.save(show_message=show_message)
+
+    def clear_calculation(self) -> None:
+        """Discard only the current allocation preview, not saved plans or inputs."""
+
+        if self.is_running():
+            QMessageBox.information(self.dialog_parent, "지금은 비울 수 없음", "현재 작업이 끝날 때까지 기다린 후 계산 결과를 비우세요.")
+            return
+        answer = QMessageBox.question(
+            self.dialog_parent,
+            "계산 결과 비우기",
+            "현재 계산 결과를 비울까요?\n저장된 장비 구성, 캐릭터 선택, 분배 설정은 변경되지 않습니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._allocation_controller.clear_preview()

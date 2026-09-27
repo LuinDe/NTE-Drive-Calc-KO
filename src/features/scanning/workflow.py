@@ -2,6 +2,8 @@
 """Scanning workflow implementation used by ScanningController."""
 
 from __future__ import annotations
+
+from src.features.input_operation_entry import request_input_entry, show_input_unavailable
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
 from src.app.constants import DRONE_HELP, OFFLINE_HELP, SCAN_HELP
@@ -21,15 +23,16 @@ from src.features.scanning.operation_logging import (
     begin_scan_operation as _begin_scan_operation,
     scan_event as _scan_event,
 )
-from src.features.scanning.post_action_dialog import load_scan_post_action_config, show_scan_post_action_dialog
+from src.features.scanning.post_action_dialog import load_scan_post_action_config
 from src.features.scanning.scan_contracts import (
     offline_scope_replaces_inventory,
     vision_cancel_message,
 )
+from src.features.scanning.scan_source_warning import confirm_scan_mode_after_workbench_sync, restore_scan_mode_selection
 from src.features.scanning.post_action_summary import append_state_mismatch_summary
 from src.domain.post_actions import post_actions_enabled, validate_post_action_config
 from src.features.scanning.vision_worker import VisionWorkerThread
-from src.services.full_visual_snapshot_commit import IncompleteVisionScanError, commit_completed_vision_inventory
+from src.services.full_visual_snapshot_commit import IncompleteVisionScanError, append_tape_main_warning, commit_completed_vision_inventory
 from src.utils.logger import logger
 
 def _page_execute(self):
@@ -49,7 +52,18 @@ def _page_execute(self):
     )
 
 
-def _on_scan_change(self, id):
+def _on_scan_change(self, id, checked=True):
+    if not checked:
+        return
+    previous_id = getattr(self, "_confirmed_scan_mode_id", 4)
+    if id in {1, 2, 3}:
+        dependencies = _current_scanning_dependencies(self)
+        if not confirm_scan_mode_after_workbench_sync(
+            self.dialog_parent, dependencies.user_database_path
+        ):
+            restore_scan_mode_selection(self.scan_group, previous_id)
+            return
+    self._confirmed_scan_mode_id = id
     if hasattr(self, "offline_frame"):
         self.offline_frame.setVisible(id == 3)
     self.total_count_frame.setVisible(id == 1)
@@ -64,20 +78,12 @@ def _on_priority_changed(self):
     pass
 
 
-def _open_scan_post_action_manager(self):
-    dependencies = _current_scanning_dependencies(self)
-    show_scan_post_action_dialog(
-        self.dialog_parent,
-        dependencies.user_config_dir,
-        dependencies.config_dir,
-        user_database_path=dependencies.user_database_path,
-    )
-
-
 def _do_exec(self):
+    sm = str(self.scan_group.checkedId())
+    if sm in {"1", "2"} and not request_input_entry(self, "interface_input", "게임 화면 스캔"):
+        return
     dependencies = _current_scanning_dependencies(self)
     sel = self.role_selector.get_selected()
-    sm = str(self.scan_group.checkedId())
     parse_only = not sel and sm in ("1", "2", "3")
     if not sel and not parse_only:
         QMessageBox.warning(self.dialog_parent, "알림", "먼저 대상 캐릭터를 선택하세요!")
@@ -112,7 +118,7 @@ def _do_exec(self):
         QMessageBox.information(
             self.dialog_parent,
             "인벤토리 데이터만 생성",
-            "현재 선택한 캐릭터가 없어 이번 스캔 분석은 SQLite 가방 스냅샷에만 기록하고 장비 세팅 계산은 하지 않습니다.",
+            "현재 선택된 캐릭터가 없어, 이번 스캔은 가방 기록만 생성하고 장비 구성 계산은 수행하지 않습니다.",
         )
     offline_scope = None
     if sm == "3":
@@ -343,7 +349,7 @@ def _on_vision_done(self, stats):
                 QMessageBox.information(
                     self.dialog_parent,
                     "보완 입력이 취소되었습니다",
-                    "이번 전체 비전 스캔은 SQLite 가방 스냅샷에 기록되지 않았습니다.",
+                    "이번 전체 비주얼 스캔에서 가방 기록이 생성되지 않았습니다.",
                 )
                 return
             manual_items = manual_result
@@ -360,13 +366,14 @@ def _on_vision_done(self, stats):
             QMessageBox.warning(
                 self.dialog_parent,
                 "보완 입력 실패",
-                f"이번 스캔은 SQLite 가방 스냅샷에 기록되지 않았습니다: {exc}",
+                f"이번 스캔에서 가방 기록이 생성되지 않았습니다: {exc}",
             )
             return
     success_count = int(stats.get("success_count", 0) or 0)
     failed_count = int(stats.get("failed_count", 0) or 0)
     duplicate_count = int(stats.get("duplicate_count", 0) or 0) + int(post.get("probe_duplicates", 0) or 0)
     summary = f"분석 성공 {success_count}장, 분석 실패 {failed_count}장, 중복 제거 {duplicate_count}장."
+    summary = append_tape_main_warning(summary, [*list(stats.get("vision_items") or []), *manual_items])
     vision_snapshot_id = None
     try:
         vision_snapshot_id = commit_completed_vision_inventory(
@@ -390,7 +397,7 @@ def _on_vision_done(self, stats):
         QMessageBox.warning(
             self.dialog_parent,
             "스캔 결과가 불완전함",
-            f"{exc}\n이번 결과는 SQLite 현재 인벤토리 스냅샷으로 전환되지 않았습니다.",
+            f"{exc}\n이번 결과로 현재 가방을 교체하지 않았습니다.",
         )
         return
     except Exception as exc:
@@ -406,7 +413,7 @@ def _on_vision_done(self, stats):
         QMessageBox.warning(
             self.dialog_parent,
             "인벤토리 기록 실패",
-            f"이번 스캔은 SQLite 가방 스냅샷에 기록되지 않았습니다: {exc}",
+            f"이번 스캔에서 가방 기록이 생성되지 않았습니다: {exc}",
         )
         return
     if isinstance(vision_snapshot_id, int) and vision_snapshot_id > 0:
@@ -416,7 +423,7 @@ def _on_vision_done(self, stats):
             refresh_home()
     if pending_manual_count:
         summary += (
-            f"\n보완 입력 대기 {pending_manual_count}개, 보완 입력 완료 {len(manual_items)}개를 이번 인식 결과와 함께 SQLite 스냅샷에 기록했습니다."
+            f"\n보완 입력 대기 {pending_manual_count}개, {len(manual_items)}개는 보완 입력을 마쳐 이번 인식 결과와 함께 저장했습니다."
         )
     _scan_event(
         self,
@@ -468,7 +475,7 @@ def _on_vision_done(self, stats):
         QMessageBox.information(
             self.dialog_parent,
             "인벤토리 데이터가 생성됨",
-            summary + "\n\n이번에는 캐릭터 우선순위를 설정하지 않아 SQLite 가방 스냅샷만 생성/갱신했고 장비 세팅 계산은 하지 않았습니다.",
+            summary + "\n\n이번에는 캐릭터 우선순위를 설정하지 않아 가방 기록만 갱신했으며, 장비 세팅 계산은 수행하지 않았습니다.",
         )
         self._pending_parse_only = False
         return
@@ -530,6 +537,8 @@ def _on_vision_canceled(self, count):
 
 
 def _start_scan(self, drone_mode):
+    if not request_input_entry(self, "interface_input", "증분 스크린샷 스캔"):
+        return
     dependencies = _current_scanning_dependencies(self)
     self._scan_dependencies = dependencies
     _begin_scan_operation(self, dependencies, route=str(drone_mode))
@@ -539,6 +548,7 @@ def _start_scan(self, drone_mode):
         output_dir=dependencies.screenshot_dir,
         template_path=dependencies.template_dir / "new_tag.png",
         mode=drone_mode,
+        operation_guard=dependencies.operation_guard,
         parent=self,
     )
     self._scan_worker.scan_done.connect(self._on_scan_done)
@@ -552,6 +562,8 @@ def _start_gamepad_scan(
     self, total_drives, post_actions_config=None, selected_roles=None, parse_during_scan=True,
     amd_compatibility=False, capture_driver="mouse",
 ):
+    if not request_input_entry(self, "interface_input", "게임패드 전체 스캔" if capture_driver == "gamepad" else "마우스 전체 스캔"):
+        return
     dependencies = _current_scanning_dependencies(self)
     self._scan_dependencies = dependencies
     self._replace_inventory_on_next_parse = True
@@ -606,12 +618,14 @@ def _start_gamepad_scan(
         screenshot_dir=dependencies.screenshot_dir,
         config_dir=dependencies.config_dir,
         user_database_path=dependencies.user_database_path,
+        static_database_path=dependencies.static_database_path,
         parent=self,
         post_actions_config=post_actions_config,
         selected_roles=selected_roles,
         parse_during_scan=parse_during_scan,
         amd_compatibility=amd_compatibility,
         capture_driver=capture_driver,
+        operation_guard=dependencies.operation_guard,
         result_is_current=lambda: (
             self.app_context.generation == dependencies.generation
             and self.app_context.account.active_account_id == dependencies.account_id
@@ -712,11 +726,7 @@ def _on_gamepad_error(self, err):
     self.btn_run.setEnabled(True)
     self.btn_run.setText("⚡  계산 시작")
     self._pending_parse_only = False
-    QMessageBox.critical(
-        self.dialog_parent,
-        "전체 비전 스캔 실패",
-        f"전체 스캔 오류:\n{err}",
-    )
+    show_input_unavailable(self, "전체 비주얼 스캔", str(err))
 
 
 def _on_gamepad_pipeline_done(self, stats):
@@ -787,10 +797,4 @@ def _on_scan_error(self, err):
     self.btn_run.setEnabled(True)
     self.btn_run.setText("⚡  계산 시작")
     self._pending_parse_only = False
-    QMessageBox.critical(
-        self.dialog_parent,
-        "스캔 실패",
-        f"스캔 오류:\n{err}",
-    )
-
-
+    show_input_unavailable(self, "스크린샷 스캔", str(err))

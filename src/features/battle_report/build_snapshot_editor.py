@@ -55,7 +55,11 @@ class BattleBuildSnapshotEditorDialog(QDialog):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(12)
 
-        note = QLabel(self._note_text())
+        source_note = ""
+        if any((detail.get("profile") or {}).get("capture_equipment_source") == "packet_settlement_account_snapshot"
+               for detail in self._details):
+            source_note = "저위험 출처: 정산 시점 데이터베이스 장비 세팅으로, 이번 전투에서 관측된 캐릭터 기준으로 고정되었으며, 첫 히트 시점의 실시간 장비는 확인되지 않았습니다.\n"
+        note = QLabel(source_note + self._note_text())
         note.setWordWrap(True)
         note.setStyleSheet(themed_style("color:#58a6ff;font-weight:600"))
         layout.addWidget(note)

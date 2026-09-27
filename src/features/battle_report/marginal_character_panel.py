@@ -193,10 +193,7 @@ class BattleMarginalCharacterPanel(QFrame):
         title = QLabel("캐릭터 패널")
         title.setObjectName("cardTitle")
         layout.addWidget(title)
-        note = QLabel(
-            "정적 패널은 이번 전투의 고정된 캐릭터 스냅샷에서 가져옵니다. 동적 패널은 해당 속성이 실제로 연결된 공식 패널 피해를 기준으로, "
-            "피해 발생 시점의 Buff 적용 후 속성으로 가중합니다. 공식 연결이 없거나 동적 근거가 부족하면 “—”를 표시합니다."
-        )
+        note = QLabel('정적 패널은 이번 전투의 스냅샷에서 가져옵니다; 동적 증거가 부족할 때는 "—"로 표시됩니다.')
         note.setObjectName("battleMarginalCharacterPanelNote")
         note.setStyleSheet(themed_style("color:#8b949e;font-size:12px"))
         note.setWordWrap(True)

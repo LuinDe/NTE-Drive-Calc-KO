@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
@@ -24,6 +25,7 @@ from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
 from src.storage.sqlite.user_data_dao import UserDataDao
 from src.ui.widgets import match_pinyin as _match_pinyin
 from src.utils.logger import logger
+from src.utils.perf import log_perf
 from src.features.inventory.equipment_lazy_view import (
     capture_equipment_restore_anchor as _capture_equipment_restore_anchor,
     restore_equipment_anchor as _restore_equipment_anchor,
@@ -116,18 +118,18 @@ def _equipment_paths(window) -> tuple[Path, Path, Path]:
             "static_database_path",
             None,
         )
-        asset_dir = getattr(window, "asset_dir", None)
-        if database_path is None or static_database_path is None or asset_dir is None:
+        asset_root = getattr(window, "game_ui_asset_root", None)
+        if database_path is None or static_database_path is None or asset_root is None:
             raise RuntimeError("장비 세팅 표시에 AppContext 또는 명시적 경로 의존성이 없습니다")
         return (
             Path(database_path),
             Path(static_database_path),
-            Path(asset_dir),
+            Path(asset_root),
         )
     return (
         Path(context.account.user_database_path),
         Path(context.paths.static_database_path),
-        Path(context.paths.asset_dir),
+        Path(context.paths.game_ui_asset_root),
     )
 
 
@@ -249,6 +251,29 @@ def _set_equipment_mode(self: Any, mode: str) -> None:
 
 def _clear_equip_content(self):
     clear_equipment_master_detail(self)
+    self._equip_rendered_mode = None
+    self._equip_rendered_states = None
+
+
+def _publish_equipment_states(self, states):
+    """Keep the existing Qt tree when a fresh read proves it unchanged."""
+    started = perf_counter()
+    mode = getattr(self, "_equipment_mode", "saved")
+    for widget_name in ("equip_role_strip", "equip_content"):
+        widget = getattr(self, widget_name, None)
+        if widget is not None:
+            widget.setEnabled(True)
+    if (getattr(self, "_equip_rendered_mode", None) == mode
+            and getattr(self, "_equip_rendered_states", None) == states):
+        log_perf(logger, "equipment.render", elapsed_ms=(perf_counter() - started) * 1000,
+                 mode=mode, skipped=True)
+        return
+    _clear_equip_content(self)
+    _queue_equipment_render(self, states)
+    self._equip_rendered_mode = mode
+    self._equip_rendered_states = dict(states)
+    log_perf(logger, "equipment.render", elapsed_ms=(perf_counter() - started) * 1000,
+             mode=mode, skipped=False)
 
 
 def _request_equipment_graduation_rate(
@@ -330,8 +355,7 @@ def _on_sqlite_equipment_display_loaded(self, token, eq):
     self.equip_mode_status.setText("")
     self._saved_equipment_states = dict(states)
     self._saved_equipment_cache_valid = True
-    _clear_equip_content(self)
-    _queue_equipment_render(self, states)
+    _publish_equipment_states(self, states)
 
 
 def _on_sqlite_equipment_display_error(self, token, error):
@@ -341,15 +365,14 @@ def _on_sqlite_equipment_display_error(self, token, error):
     self.equip_mode_status.setText("저장된 장비 세팅 읽기 실패")
     QMessageBox.warning(
         self,
-        "저장된 방안 호환성 오류",
-        "현재 공식 정적 데이터로는 일부 저장된 방안을 해석할 수 없습니다."
-        "방안은 수정되지 않았습니다. 로그의 형태, 세트 또는 속성 ID를 확인한 뒤 다시 계산할지 결정하세요.\n\n"
-        f"상세 원인: {error}",
+        "장비 구성 읽기 실패",
+        "상태: 장비 구성이 아직 업데이트되지 않아 기존 방안이 그대로 유지됩니다.\n"
+        "원인: 일부 방안이 현재 자료 라이브러리 확인을 통과하지 못했습니다.\n"
+        "다음 단계: 계정 로그의 오류 코드를 확인한 뒤 다시 계산할지 결정하세요.",
     )
-    _clear_equip_content(self)
     self._saved_equipment_states = {}
     self._saved_equipment_cache_valid = False
-    _queue_equipment_render(self, {})
+    _publish_equipment_states(self, {})
 
 
 def _on_game_equipment_display_loaded(self, token, result):
@@ -404,8 +427,7 @@ def _on_game_equipment_display_loaded(self, token, result):
     self._game_loadout_states = scored_states
     self._saved_equipment_states = dict(saved_states)
     self._saved_equipment_cache_valid = True
-    _clear_equip_content(self)
-    _queue_equipment_render(self, scored_states)
+    _publish_equipment_states(self, scored_states)
 
 
 def _on_game_equipment_display_error(self, token, error):
@@ -414,9 +436,8 @@ def _on_game_equipment_display_error(self, token, error):
     logger.error(f"게임 내 장비 세팅 표시 새로 고침 실패: {error}")
     self.equip_mode_status.setText("게임 내 장비 읽기 실패")
     self.equip_import_all_btn.setEnabled(False)
-    self._game_loadout_message = f"게임 내 장비 읽기 실패: {error}"
-    _clear_equip_content(self)
-    _queue_equipment_render(self, {})
+    self._game_loadout_message = "게임 장비 구성 읽기가 중단되었습니다; 연결을 다시 검사한 후 시도하세요. 기존 방안은 변경되지 않습니다."
+    _publish_equipment_states(self, {})
 
 
 def _refresh_equip(self, *, restore_role_name=None):
@@ -433,7 +454,22 @@ def _refresh_equip(self, *, restore_role_name=None):
     self._equip_render_token = object()
     self._equip_lazy_entries = []
     self._equip_render_queue = []
-    _clear_equip_content(self)
+    # Retain a verified projection during a same-mode read. Mutations and mode
+    # switches invalidate it; no old buttons remain interactive in that case.
+    retain_view = (
+        getattr(self, "_equip_rendered_mode", None)
+        == getattr(self, "_equipment_mode", "saved")
+        and getattr(self, "_saved_equipment_cache_valid", False)
+    )
+    if not retain_view:
+        _clear_equip_content(self)
+    elif isinstance(self, QWidget):
+        # Old controls stay visible, but cannot write against an unverified
+        # read of a newer database revision.
+        for widget_name in ("equip_role_strip", "equip_content"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(False)
     # The production page may contain many plans and each requires snapshot
     # projection.  Keep database work off the Qt event loop; plain test hosts
     # retain the direct path below.
@@ -441,12 +477,13 @@ def _refresh_equip(self, *, restore_role_name=None):
         token = object()
         self._equip_load_token = token
         game_mode = getattr(self, "_equipment_mode", "saved") == "game"
-        loading = QLabel(
-            "게임 내 장비를 읽는 중…" if game_mode else "저장된 장비 세팅을 읽는 중…"
-        )
-        loading.setStyleSheet(themed_style("color:#8b949e;padding:24px"))
-        loading.setAlignment(Qt.AlignCenter)
-        self.equip_content_layout.addWidget(loading)
+        if not retain_view:
+            loading = QLabel(
+                "게임 내 장비를 읽는 중…" if game_mode else "저장된 장비 세팅을 읽는 중…"
+            )
+            loading.setStyleSheet(themed_style("color:#8b949e;padding:24px"))
+            loading.setAlignment(Qt.AlignCenter)
+            self.equip_content_layout.addWidget(loading)
         if game_mode:
             cached_saved_states = (
                 dict(getattr(self, "_saved_equipment_states", {}) or {})
@@ -479,6 +516,7 @@ def _refresh_equip(self, *, restore_role_name=None):
         else:
             worker.result_ready.connect(lambda eq, current=token: _on_sqlite_equipment_display_loaded(self, current, eq))
             worker.error.connect(lambda error, current=token: _on_sqlite_equipment_display_error(self, current, error))
+        worker.finished.connect(worker.deleteLater)
         worker.start()
         return
     if getattr(self, "_equipment_mode", "saved") == "game":

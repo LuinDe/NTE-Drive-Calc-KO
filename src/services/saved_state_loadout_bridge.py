@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from src.domain.drive_layout import extract_drive_blocks_from_state
+from src.domain.loadout_plan_scores import exact_assignment_score_total
 from src.services.virtual_equipment_service import (
     is_virtual_equipment_assignment,
     virtual_equipment_inventory_item,
@@ -412,9 +413,20 @@ class SavedStateLoadoutBridge:
         self,
         user_dao: UserDataDao,
         static_dao: StaticGameDataDao,
+        *, frozen_snapshot_id: int | None = None,
     ) -> None:
         self.user_dao = user_dao
         self.static_dao = static_dao
+        self._frozen_snapshot_id = frozen_snapshot_id
+        self._frozen_items = (
+            {(item["uid_slot"], item["uid_serial"]): item
+             for item in user_dao.list_inventory_items(frozen_snapshot_id)}
+            if frozen_snapshot_id is not None else None
+        )
+        self._frozen_shapes = (
+            {shape["shape_id"]: shape for shape in static_dao.list_shapes()}
+            if frozen_snapshot_id is not None else None
+        )
 
     def save_role_plan(
         self,
@@ -484,11 +496,17 @@ class SavedStateLoadoutBridge:
                 f"정적 데이터베이스에 캐릭터 ID {character_id}({role_name})이(가) 없습니다"
             )
 
-        inventory = self.user_dao.list_inventory_items(selected_snapshot_id)
-        items_by_uid = {
-            (item["uid_slot"], item["uid_serial"]): item for item in inventory
-        }
-        shapes = {shape["shape_id"]: shape for shape in self.static_dao.list_shapes()}
+        if self._frozen_snapshot_id is not None:
+            if selected_snapshot_id != self._frozen_snapshot_id:
+                raise SavedStateLoadoutError("같은 저장에서 고정 가방 스냅샷을 전환할 수 없습니다")
+            items_by_uid = self._frozen_items
+            shapes = self._frozen_shapes
+        else:
+            items_by_uid = {
+                (item["uid_slot"], item["uid_serial"]): item
+                for item in self.user_dao.list_inventory_items(selected_snapshot_id)
+            }
+            shapes = {shape["shape_id"]: shape for shape in self.static_dao.list_shapes()}
 
         assignments: list[dict[str, Any]] = []
         blocks = extract_drive_blocks_from_state({role_name: dict(role_state)})
@@ -580,6 +598,15 @@ class SavedStateLoadoutBridge:
         module_count = sum(item["kind"] == "module" for item in assignments)
         if module_count <= 0:
             raise SavedStateLoadoutError(f"캐릭터 [{role_name}]에게 장착할 드라이브가 없습니다")
+        normalized_payload = dict(payload or {
+            "schema": "saved-state-official-loadout-v1",
+            "source": "equipment_page",
+            "source_role_name": role_name,
+        })
+        exact_score = exact_assignment_score_total(
+            assignments,
+            normalized_payload.get("assignment_scores") or {},
+        )
         return PreparedLoadoutPlan(
             name=name or f"장비 세팅 페이지: {role_name}",
             role_name=role_name,
@@ -594,11 +621,7 @@ class SavedStateLoadoutBridge:
                 else "ready"
             ),
             assignments=tuple(assignments),
-            payload=dict(payload or {
-                "schema": "saved-state-official-loadout-v1",
-                "source": "equipment_page",
-                "source_role_name": role_name,
-            }),
-            score=score,
+            payload=normalized_payload,
+            score=exact_score if exact_score is not None else score,
             module_count=module_count,
         )
