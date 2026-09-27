@@ -10,6 +10,20 @@ NTE Drive Calc **2.3.0** 한국어 패치입니다. 원작자의 허락을 받�
 원본 실행 파일은 `NTE_Drive_Calc.original.exe`로, 원본 튜토리얼 이미지는 `guide_zh` 폴더로 자동 백업됩니다.
 **되돌리려면** 설치 파일을 다시 실행하고 `[아니오] 원본으로 복원`을 고르세요.
 
+## 「이 패치는 NTE Drive Calc 2.3.0 전용입니다」 오류가 나던 이유
+
+공식 프로그램 2.3.0이 배포 도중 **한 번 교체되었습니다.** 제작자가 동기화 컴포넌트(nte-core)를
+고친 빌드를 같은 2.3.0 이름으로 다시 올렸고, 그 과정에서 메인 실행 파일도 새로 빌드되어 해시가
+바뀌었습니다.
+
+이 패치는 엉뚱한 버전에 덮어써서 프로그램을 망가뜨리지 않도록 **설치 전에 원본 실행 파일을
+확인**합니다. 교체된 새 원본은 등록되어 있지 않던 파일이라 확인 단계에서 걸려 설치가 중단된
+것입니다. 파일이 손상된 것은 아니며, 아무것도 건드리지 않고 멈춘 상태였습니다.
+
+**이번 릴리스는 교체 전후 두 빌드를 모두 인식합니다.** 번역 내용은 이전 릴리스와 완전히 같습니다
+(두 공식 빌드의 파이썬 코드가 동일해서 번역을 그대로 쓸 수 있습니다). 이전 한글 패치를 쓰시던
+분도 그대로 덮어 설치됩니다.
+
 ## 이번 업데이트 (2.3.0)
 
 - **공식 2.3.0 대응** — 중국 서버 신규 캐릭터 업데이트에 맞춘 재번역입니다.
@@ -40,9 +54,10 @@ NTE Drive Calc **2.3.0** 한국어 패치입니다. 원작자의 허락을 받�
 ## SHA256
 
 ```
-c31940e6398e6fbf74e458683a69d025ab4042911430e30af0c3e80f0a6621ac  NTE_Drive_Calc_2.3.0_KO_Patch_Setup.exe
-37b5e2da2754c5f0cde1ba61d5e0ba10ffa9e58d91e7d6349f8f2eb0121f3c24  패치된 NTE_Drive_Calc.exe
-b9e2ffe49bd238b6d55932e395da2f7f09e14778ed134290c3229beae3db40c9  공식 2.3.0 원본 (패치 전)
+7922a65557f36a9aa164344b8f9ea0ba2f6b14f492f2718a0545f211a55ce12f  NTE_Drive_Calc_2.3.0_KO_Patch_Setup.exe
+7df136920e2c1ccdda9a0b805c33f829e87ab526f2f228a4d16dce9368bc0c9c  패치된 NTE_Drive_Calc.exe
+505950ca2261902df6c78a61c3f17c6e756b82bb9309689ac08114c4f3a1cbbf  공식 2.3.0 원본 (현재 배포본)
+b9e2ffe49bd238b6d55932e395da2f7f09e14778ed134290c3229beae3db40c9  공식 2.3.0 원본 (교체 전 빌드)
 ```
 
 설치 후 직접 확인하실 수 있습니다.
@@ -54,7 +69,7 @@ certutil -hashfile "C:\Program Files\NTE Drive Calc\NTE_Drive_Calc.exe" SHA256
 ## 라이선스
 
 NTE Drive Calc는 **AGPL-3.0**으로 배포되는 프로그램이며 이 패치는 그 파생물입니다. 이 릴리스의
-실행 파일에 대응하는 소스는 같은 태그의 [`src/`](../../tree/v2.3.0-ko/src)에 있습니다.
-자세한 고지는 [SOURCE_OFFER.md](../../blob/v2.3.0-ko/SOURCE_OFFER.md)를 참고하세요.
+실행 파일에 대응하는 소스는 같은 태그의 [`src/`](../../tree/v2.3.0-ko.2/src)에 있습니다.
+자세한 고지는 [SOURCE_OFFER.md](../../blob/v2.3.0-ko.2/SOURCE_OFFER.md)를 참고하세요.
 
 원저작권: NTE Drive Calc contributors ([@hxwd94666](https://github.com/hxwd94666))
