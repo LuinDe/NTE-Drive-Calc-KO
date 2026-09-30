@@ -28,8 +28,9 @@ NTE Drive Calc **2.3.0** 한국어 패치입니다. 원작자의 허락을 받�
 
 - **공식 2.3.0 대응** — 중국 서버 신규 캐릭터 업데이트에 맞춘 재번역입니다.
 - 신규 화면 문자열 **1,716개** 번역, 기존 번역 8,300여 개 재사용
-- **신규 캐릭터 2명 대응** — 한국 서버 미출시라 임시 명칭을 사용했습니다: 明音凛 → **아카네 린**, 黑羽 → **레이븐**.
-  공식 한국어 명칭이 공개되면 다음 패치에서 교체합니다.
+- **신규 캐릭터 2명 대응** — 明音凛 → **아카네 린**, 黑羽 → **레이븐** (한국 서버 공식 명칭, 9/30 출시)
+- **레이븐 공식 스킬명 반영 (9/30 파일 교체)** — 일반 공격 「스쳐가는 그림자」, 바이레일 스킬 「장송의 깃털」,
+  울티메이트 「모든 영혼에 안식을」. 나머지 스킬·각성 이름은 공식 자료가 공개되는 대로 교체합니다.
 - 신규 아크·스킬·스테이지·몬스터 이름 33개, 신규 효과 설명문 190건 번역
 - 캐릭터 상세의 새 화면(피해 보너스 표, 한계 이득 표, 가중치 표 등) 대응
 - 전투 리포트 네이티브 컴포넌트 갱신에 맞춰 표시 사전 재생성 (1,336 항목)
@@ -54,8 +55,8 @@ NTE Drive Calc **2.3.0** 한국어 패치입니다. 원작자의 허락을 받�
 ## SHA256
 
 ```
-7922a65557f36a9aa164344b8f9ea0ba2f6b14f492f2718a0545f211a55ce12f  NTE_Drive_Calc_2.3.0_KO_Patch_Setup.exe
-7df136920e2c1ccdda9a0b805c33f829e87ab526f2f228a4d16dce9368bc0c9c  패치된 NTE_Drive_Calc.exe
+ef7ce2a56f12740dfba867627384663adb05ec9e122684588970554b75e833ee  NTE_Drive_Calc_2.3.0_KO_Patch_Setup.exe
+3375bf292af5d1346b61dbdd3d81b1f8ffaf2c72cb989bf2a27bdf251b30e81a  패치된 NTE_Drive_Calc.exe
 505950ca2261902df6c78a61c3f17c6e756b82bb9309689ac08114c4f3a1cbbf  공식 2.3.0 원본 (현재 배포본)
 b9e2ffe49bd238b6d55932e395da2f7f09e14778ed134290c3229beae3db40c9  공식 2.3.0 원본 (교체 전 빌드)
 ```
@@ -69,7 +70,7 @@ certutil -hashfile "C:\Program Files\NTE Drive Calc\NTE_Drive_Calc.exe" SHA256
 ## 라이선스
 
 NTE Drive Calc는 **AGPL-3.0**으로 배포되는 프로그램이며 이 패치는 그 파생물입니다. 이 릴리스의
-실행 파일에 대응하는 소스는 같은 태그의 [`src/`](../../tree/v2.3.0-ko.2/src)에 있습니다.
-자세한 고지는 [SOURCE_OFFER.md](../../blob/v2.3.0-ko.2/SOURCE_OFFER.md)를 참고하세요.
+실행 파일에 대응하는 소스는 같은 태그의 [`src/`](../../tree/9d832459cc181f9890732b362de5e24fefb36dca/src)에 있습니다.
+자세한 고지는 [SOURCE_OFFER.md](../../blob/9d832459cc181f9890732b362de5e24fefb36dca/SOURCE_OFFER.md)를 참고하세요.
 
 원저작권: NTE Drive Calc contributors ([@hxwd94666](https://github.com/hxwd94666))
