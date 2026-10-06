@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from src.services.battle_build_equipment_service import apply_equipment_override
+from src.domain.battle_world_bonus_edit import world_bonus_edit_stats
 
 
 def apply_battle_build_edit(
@@ -31,6 +32,8 @@ def apply_battle_build_edit(
             for row in character.get("stats") or ()
             if str(row.get("source_group") or "") == "world_bonus"
         ]
+        if "battle_world_bonus" in profile:
+            frozen_world_bonus = world_bonus_edit_stats(profile["battle_world_bonus"])
         character.update({
             "profile_source": "user_edited_snapshot",
             "character_level": int(edited["character_level"]),

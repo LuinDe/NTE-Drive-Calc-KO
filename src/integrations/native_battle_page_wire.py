@@ -80,6 +80,8 @@ def decode_page(value: dict):
                 'marginal_benefits', 'marginal_panel', 'candidate_display_analysis'}
     if not isinstance(value, dict) or not required <= value.keys():
         raise NativeAnalysisError('분석 코어 페이지 응답 필드가 일치하지 않습니다')
+    from src.integrations.native_battle_payload_wire import restore_payloads
+    value = restore_payloads(value)
     catalog = value['target_catalog']
     if catalog is not None and not isinstance(catalog, dict):
         raise NativeAnalysisError('분석 코어 대상 목록이 잘못되었습니다')

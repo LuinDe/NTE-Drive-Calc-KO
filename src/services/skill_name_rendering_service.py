@@ -95,6 +95,8 @@ def preferred_battle_damage_name(
         "",
         "미식별 스킬",
         "알 수 없는 스킬",
+        "未识别技能",
+        "未知技能",
         "unknown skill",
         "unknown",
     }:
@@ -113,7 +115,7 @@ def battle_hit_skill_label(damage_name, skill_name, ability_id="") -> str:
     """Keep skill category and damage phase without repeating an enclosing name."""
     damage = preferred_battle_damage_name(damage_name, skill_name, ability_id)
     skill = preferred_battle_damage_name(None, skill_name)
-    if skill == "미식별 스킬" or skill == damage:
+    if skill in ("미식별 스킬", "未识别技能") or skill == damage:
         return damage
     if damage in skill:
         return skill

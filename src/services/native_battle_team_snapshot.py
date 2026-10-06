@@ -19,6 +19,10 @@ def select_native_team_snapshot(snapshot):
     profiles = selected.get("character_projection") or {}
     if "profiles" in profiles:
         profiles["profiles"] = [row for row in profiles["profiles"] if row.get("character_id") in ids]
+    equipped = profiles.get("battleEquipment") or {}
+    for field, owner in (("items", "equipped_character_id"), ("characters", "character_id")):
+        if field in equipped:
+            equipped[field] = [row for row in equipped[field] if row.get(owner) in ids]
     domains = selected.get("domains") or {}
     strings = {str(value) for value in ids}
     # Compare the same team subset on both sides of an entry refresh. Retain the

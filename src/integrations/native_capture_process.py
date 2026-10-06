@@ -10,7 +10,7 @@ import os
 from src.integrations.nte_core_protocol import NteCoreProcessError
 
 
-def native_capture_game_pid() -> int | None:
+def _native_game_identity() -> tuple[int, int] | None:
     if os.name != "nt":
         return None
 
@@ -71,6 +71,21 @@ def native_capture_game_pid() -> int | None:
     finally:
         close(process)
     creation = (values[0].dwHighDateTime << 32) | values[0].dwLowDateTime
+    return pid, creation
+
+
+def native_game_pid() -> int | None:
+    """Resolve the game without requiring the replaceable capture plugin's pipe."""
+    identity = _native_game_identity()
+    return identity[0] if identity is not None else None
+
+
+def native_capture_game_pid() -> int | None:
+    identity = _native_game_identity()
+    if identity is None:
+        return None
+    pid, creation = identity
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     wait = kernel.WaitNamedPipeW
     wait.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
     wait.restype = wintypes.BOOL

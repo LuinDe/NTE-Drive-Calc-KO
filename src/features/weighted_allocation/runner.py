@@ -8,13 +8,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from src.observability import OperationContext, operation_scope
-from src.optimizer.contracts import (
-    EQUIP_SHAPE_ID,
-    EQUIP_UID,
-    ROLE_BLUEPRINT_LAYOUT,
-    ROLE_EQUIPPED_DRIVES,
-    ROLE_EQUIPPED_TAPE,
-)
 from src.services.allocation_context import (
     ALLOCATION_CONTEXT_SOLVER_VERSION,
     AllocationContext,
@@ -22,15 +15,13 @@ from src.services.allocation_context import (
     build_allocation_context,
 )
 from src.services.allocation_legacy_adapter import score_allocation_candidate
-from src.services.allocation_main_value_service import weighted_option_tape_main_values
 from src.services.allocation_solver import (
     AllocationAssignment,
     AllocationSolveResult,
     RoleAllocationOption,
     solve_allocation_context,
 )
-from src.services.saved_state_loadout_bridge import SavedStateLoadoutBridge
-from src.services.sqlite_allocation_inventory import legacy_shape_id
+from src.services.weighted_allocation_save import save_weighted_preview_records
 from src.services.virtual_equipment_service import (
     grid_count_from_geometry,
     virtual_equipment_item_id,
@@ -471,14 +462,14 @@ def _run_weighted_allocation(
             shared_database_path=request.shared_database_path,
             static_database_path=static_database_path,
         )
+    with UserDataDao(request.user_database_path) as user_dao, StaticGameDataDao(static_database_path) as static_dao:
+        baselines = freeze_weighted_loadout_comparisons(user_dao, static_dao, context, ())
     result = solve_allocation_context(
         context, top_k=int(request.top_k), include_role_top_k=request.include_role_top_k,
         allow_missing_core=True,
     )
     with UserDataDao(request.user_database_path) as user_dao, StaticGameDataDao(static_database_path) as static_dao:
-        loadout_comparisons = freeze_weighted_loadout_comparisons(
-            user_dao, static_dao, context, result.unified.selected,
-        )
+        loadout_comparisons = refresh_weighted_loadout_comparisons(baselines, context, result.unified.selected)
         latest_stat = static_dao.database_path.stat()
         if (latest_stat.st_size, latest_stat.st_mtime_ns) != static_file_identity:
             raise RuntimeError("계산 도중 정적 데이터셋이 업데이트되었습니다. 계산을 다시 실행하세요.")
@@ -530,77 +521,13 @@ def save_weighted_allocation_preview(
         role_count=len(result.unified.selected),
         snapshot_id=result.snapshot_id,
     ) as span:
-        plan_ids = _save_weighted_allocation_preview(
+        plan_ids = save_weighted_preview_records(
             preview,
             slot_ids_by_character=slot_ids_by_character,
         )
         span.annotate(saved_plan_count=len(plan_ids))
         return plan_ids
 
-
-def _save_weighted_allocation_preview(
-    preview: WeightedAllocationPreview,
-    *,
-    slot_ids_by_character: Mapping[int, int] | None = None,
-) -> tuple[int, ...]:
-    result = preview.result
-    with UserDataDao(preview.user_database_path) as user_dao, StaticGameDataDao(preview.static_database_path) as static_dao:
-        if preview.static_file_identity is not None:
-            current_stat = static_dao.database_path.stat()
-            if (current_stat.st_size, current_stat.st_mtime_ns) != preview.static_file_identity:
-                raise RuntimeError("계산에 사용된 정적 데이터셋이 업데이트되었습니다. 계산을 다시 실행하세요.")
-        if static_dao.summary()["dataset"]["dataset_id"] != preview.static_dataset.dataset_id:
-            raise RuntimeError("계산에 사용된 정적 데이터셋이 업데이트되었습니다. 계산을 다시 실행하세요.")
-        role_names = {
-            int(character["character_id"]): str(character.get("name_zh") or character["character_id"])
-            for character in static_dao.list_characters()
-        }
-        bridge = SavedStateLoadoutBridge(user_dao, static_dao)
-        prepared_plans: list[dict[str, Any]] = []
-        for option in result.unified.selected:
-            role_name = role_names.get(option.character_id)
-            if role_name is None:
-                raise RuntimeError(f"정적 데이터셋에서 캐릭터 {option.character_id}을(를) 찾을 수 없습니다.")
-            prepared = bridge.prepare_role_plan(
-                role_name=role_name,
-                role_state=_role_state(option),
-                character_id=option.character_id,
-                snapshot_id=result.snapshot_id,
-                name=f"스탯 세팅: {role_name}",
-                score=option.score,
-                payload={
-                    "schema": "allocation-official-snapshot-v1",
-                    "source": "weighted_allocation",
-                    "source_role_name": role_name,
-                    "allocation_strategy": result.unified.strategy,
-                    "profile_id": result.profile_id,
-                    "profile_version": result.profile_version,
-                    "solver_version": result.solver_version,
-                    "assignment_scores": {
-                        f"nte-{assignment.kind}-{assignment.uid[0]}-{assignment.uid[1]}": assignment.score
-                        for assignment in option.assignments
-                    },
-                    "tape_main_values": weighted_option_tape_main_values(preview.context, option),
-                    "static_dataset": {
-                        "schema_version": preview.static_dataset.schema_version,
-                        "dataset_id": preview.static_dataset.dataset_id,
-                        "importer_version": preview.static_dataset.importer_version,
-                        "built_at_utc": preview.static_dataset.built_at_utc,
-                    },
-                },
-            )
-            record = prepared.as_record()
-            if slot_ids_by_character is not None:
-                slot_id = slot_ids_by_character.get(int(option.character_id))
-                if slot_id is None:
-                    raise RuntimeError(
-                        f"캐릭터 [{role_name}]에 명확한 장비 세팅 슬롯 저장 대상이 없습니다."
-                    )
-                record["slot_id"] = int(slot_id)
-            prepared_plans.append(record)
-        if slot_ids_by_character is not None:
-            return user_dao.save_plans_to_slots(prepared_plans)
-        return user_dao.replace_active_loadout_plans(prepared_plans)
 
 
 def replace_weighted_allocation_assignment(
@@ -738,56 +665,3 @@ def replace_weighted_allocation_assignment(
             preview.loadout_comparisons, preview.context, updated_options,
         ),
     )
-
-
-def _role_state(option: RoleAllocationOption) -> dict[str, object]:
-    """Project a Context result into the existing SQLite plan bridge input."""
-
-    drives = [
-        {
-            EQUIP_UID: f"nte-module-{assignment.uid[0]}-{assignment.uid[1]}",
-            EQUIP_SHAPE_ID: str(legacy_shape_id(assignment.geometry or "")),
-            "geometry": assignment.geometry,
-            "grid_count": assignment.grid_count,
-            "virtual": assignment.virtual,
-            "virtual_equipment": (
-                {
-                    "item_id": assignment.item_id,
-                    "kind": "module",
-                    "suit_id": assignment.suit_id,
-                    "geometry": assignment.geometry,
-                    "grid_count": assignment.grid_count,
-                    "quality": "orange",
-                }
-                if assignment.virtual
-                else None
-            ),
-        }
-        for assignment in option.assignments
-        if assignment.kind == "module"
-    ]
-    core = next((assignment for assignment in option.assignments if assignment.kind == "core"), None)
-    return {
-        ROLE_BLUEPRINT_LAYOUT: [list(row) for row in option.generated_board],
-        ROLE_EQUIPPED_DRIVES: drives,
-        ROLE_EQUIPPED_TAPE: (
-            {
-                EQUIP_UID: f"nte-core-{core.uid[0]}-{core.uid[1]}",
-                "virtual": core.virtual,
-                "virtual_equipment": (
-                    {
-                        "item_id": core.item_id,
-                        "kind": "core",
-                        "suit_id": core.suit_id,
-                        "geometry": None,
-                        "grid_count": None,
-                        "quality": "orange",
-                    }
-                    if core.virtual
-                    else None
-                ),
-            }
-            if core is not None
-            else None
-        ),
-    }

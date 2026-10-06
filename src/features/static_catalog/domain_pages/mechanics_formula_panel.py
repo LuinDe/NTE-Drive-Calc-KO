@@ -45,7 +45,7 @@ class MechanicsFormulaPanel(QWidget):
             ))
             root.addWidget(notice)
         for section in detail.sections:
-            accent = "#d2a8ff" if section.title == "完整公式" else "#30363d"
+            accent = "#d2a8ff" if section.title in ("전체 공식", "完整公式") else "#30363d"
             root.addWidget(FieldCard(section.title, section.fields, accent=accent, parent=self))
         del open_link
         root.addStretch(1)
@@ -67,14 +67,19 @@ class MechanicsFormulaPanel(QWidget):
         ))
         root.addWidget(label)
         highlighted = {
-            "持续伤害": "状态/层数",
-            "持续直伤": "状态/层数",
-            "环合基础": "面板或等级基础",
-            "环合": "增伤/专属区",
-            "倾陷": "增伤/专属区",
-            "独立增伤": "增伤/专属区",
-            "最终取整": "最终结算",
-            "生命结算": "最终结算",
+            "持续伤害": "상태/중첩 수",
+            "持续直伤": "상태/중첩 수",
+            "지속 직접 피해": "상태/중첩 수",
+            "环合基础": "패널 또는 레벨 기본값",
+            "사이클 기본": "패널 또는 레벨 기본값",
+            "环合": "피해 증가/전용 구간",
+            "倾陷": "피해 증가/전용 구간",
+            "独立增伤": "피해 증가/전용 구간",
+            "독립 피해 증가": "피해 증가/전용 구간",
+            "最终取整": "최종 정산",
+            "최종 내림": "최종 정산",
+            "生命结算": "최종 정산",
+            "HP 정산": "최종 정산",
             "共享伤害": "최종 정산",
         }.get(active, "")
         names = [f"【{name}】" if name == highlighted else name for name in FLOW]

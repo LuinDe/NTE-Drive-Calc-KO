@@ -9,6 +9,7 @@ from src.app.constants import APP_VERSION
 from src.integrations.nte_core import NteCoreClient
 from src.integrations.native_allocation import create_allocation_executor
 from src.scanner.batch_processor import BatchProcessor
+from src.services.allocation_failure_diagnostics import explain_allocation_failures
 from src.solver.orchestrator import NTEPipelineOrchestrator
 from src.storage.sqlite.user_data_dao import UserDataDao
 from src.services.vision_inventory_snapshot import import_vision_inventory
@@ -75,13 +76,21 @@ class NTEAppFacade:
         locked_uids=None,
         blueprint_combo_limit: int = 2000,
         cancel_check=None,
+        allocation_observer=None,
     ):
         """使用已经固定的数据集合计算，不要求生成中间库存文件。"""
 
-        allocation_executor = create_allocation_executor(
+        native_allocation_executor = create_allocation_executor(
             static_database_path=self.allocation_static_database_path,
             cancel_check=cancel_check,
         )
+
+        def allocation_executor(request, scorer):
+            if allocation_observer is not None:
+                allocation_observer(request, scorer)
+            plans = native_allocation_executor(request, scorer)
+            return explain_allocation_failures(plans, request, scorer.stat_catalog)
+
         orchestrator = NTEPipelineOrchestrator(
             config_dir=self.config_dir,
             user_database_path=self.user_database_path,

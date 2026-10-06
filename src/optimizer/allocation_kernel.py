@@ -48,7 +48,7 @@ class AllocationKernelRequest:
     stat_priority_configs: Mapping[str, Mapping]
     property_limits: Mapping[str, tuple[AllocationPropertyLimit, ...]]
     priority_groups: tuple[tuple[str, ...], ...] = ()
-    crit_rate_caps: Mapping[str, float] = None
+    crit_rate_caps: Mapping[str, float | None] = None
     # Retained only for legacy caller compatibility.  A missing core/card can
     # never invalidate a complete drive blueprint.
     allow_missing_core: bool = False

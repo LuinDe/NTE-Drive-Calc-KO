@@ -290,7 +290,7 @@ def _build_strategy_card(window, layout):
     window.strategy_group = QButtonGroup()
     strategy_options = [
         "캐릭터 우선 — 캐릭터 순서대로 세팅, 앞순위 캐릭터를 우선 배려",
-        "증분 갱신 — 착용 중인 장비는 유지하고 여유 장비로만 보충",
+        "잠금 갱신 — 모든 계산 세팅을 잠그고 나머지 장비로만 분배",
     ]
     for index, text in enumerate(strategy_options):
         rb = QRadioButton(text)

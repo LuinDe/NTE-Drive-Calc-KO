@@ -36,6 +36,7 @@ class LegacyAllocationStaticCatalog:
     sets_db: dict[str, dict[str, Any]]
     shapes_db: dict[str, DriveShape]
     board_matrices: dict[str, list[list[int]]]
+    fork_ids_by_name: dict[str, str]
 
 
 def _shape_matrix(shape: dict[str, Any]) -> list[list[int]]:
@@ -80,6 +81,7 @@ def _likeability_crit_rate_bonus(
     static_dao: StaticGameDataDao,
     user_dao: UserDataDao | None,
     character_id: int,
+    *, enabled_override: bool | None = None,
 ) -> float:
     """Return this account's enabled level-10 affinity CritBase bonus."""
 
@@ -87,11 +89,12 @@ def _likeability_crit_rate_bonus(
     if not bonus:
         return 0.0
     profile = user_dao.get_character_profile(character_id) if user_dao else None
-    enabled = (
-        bool(profile.get("likeability_level_10_enabled"))
-        if profile is not None
-        else True
-    )
+    if enabled_override is not None:
+        enabled = enabled_override
+    elif profile is not None:
+        enabled = bool(profile.get("likeability_level_10_enabled"))
+    else:
+        enabled = True
     if not enabled:
         return 0.0
     return sum(
@@ -107,7 +110,7 @@ def _current_role_calculation_projection(
     """Project current fork state without replacing workshop base weights."""
 
     profile = detail.get("profile") or {}
-    fork_id = str(profile.get("fork_id") or "")
+    fork_id = str(profile.get("fork_id") or "").strip()
     fork = next(
         (
             item for item in detail.get("forks") or ()
@@ -115,17 +118,44 @@ def _current_role_calculation_projection(
         ),
         None,
     )
+    if fork is None:
+        # A profile can name a fork absent from the frozen static catalogue.
+        # Keep that source unknown instead of silently restoring the
+        # graduation-template fork. An explicit empty fork is known zero.
+        return {
+            "default_weapon": "",
+            "default_fork_id": fork_id,
+            "likeability_level_10_enabled": bool(
+                profile.get("likeability_level_10_enabled")
+            ),
+            "active_fork_crit_rate_bonus": (
+                0.0 if "fork_id" in profile and not fork_id else None
+            ),
+        }
     fork_stats = fork_active_panel_stats(
         fork,
         int(profile.get("fork_level") or 1),
         breakthrough_stage=profile.get("fork_breakthrough_stage"),
         refinement_level=profile.get("fork_refinement_level"),
     )
+    refinement = profile.get("fork_refinement_level")
+    # A reviewed zero-permanent fork has no refinement row by design.  That is
+    # known zero, not missing evidence for its level/breakthrough CritBase.
+    permanent_known = fork.get("permanent_review_status") in (
+        "confirmed_no_permanent", "conditional_only",
+    ) or (
+        refinement is not None and any(
+            str(row.get("refinement_level")) == str(refinement)
+            for row in fork.get("permanent_properties") or ()
+        )
+    )
     return {
         "default_weapon": str((fork or {}).get("name_zh") or ""),
-        "active_fork_crit_rate_bonus": round(
-            max(0.0, float(fork_stats.get("CritBase") or 0.0)) * 100.0,
-            4,
+        "default_fork_id": fork_id,
+        "likeability_level_10_enabled": bool(profile.get("likeability_level_10_enabled")),
+        "active_fork_crit_rate_bonus": (
+            round(max(0.0, float(fork_stats.get("CritBase") or 0.0)) * 100.0, 4)
+            if permanent_known else None
         ),
     }
 
@@ -169,6 +199,17 @@ def build_legacy_allocation_static_catalog(
             str(fork.get("fork_id") or ""): str(fork.get("name_zh") or "")
             for fork in static_dao.list_fork_templates()
         }
+        fork_ids_by_name: dict[str, str] = {}
+        duplicate_fork_names: set[str] = set()
+        for fork_id, name in fork_names.items():
+            if not fork_id or not name:
+                continue
+            if name in fork_ids_by_name and fork_ids_by_name[name] != fork_id:
+                duplicate_fork_names.add(name)
+            else:
+                fork_ids_by_name[name] = fork_id
+        for name in duplicate_fork_names:
+            fork_ids_by_name.pop(name, None)
         graduation_templates = {
             int(template["character_id"]): template
             for template in static_dao.list_character_graduation_templates()
@@ -205,6 +246,7 @@ def build_legacy_allocation_static_catalog(
                     str(graduation_template.get("fork_id") or ""),
                     "",
                 )
+                default_fork_id = str(graduation_template.get("fork_id") or "")
                 calculation_projection = None
                 if user_dao is not None:
                     try:
@@ -215,25 +257,58 @@ def build_legacy_allocation_static_catalog(
                             static_database_path=static_dao.database_path,
                             request_cache=detail_cache,
                         )
-                        calculation_projection = _current_role_calculation_projection(
-                            detail,
+                        calculation_projection = (
+                            _current_role_calculation_projection(detail) or None
                         )
                     except (OSError, RuntimeError, ValueError):
-                        calculation_projection = None
+                        saved_profile = user_dao.get_character_profile(character_id)
+                        observed_profile = user_dao.get_native_character_profile_observation(
+                            character_id
+                        )
+                        fallback_profile = dict(saved_profile or {})
+                        fork_observed = bool(
+                            observed_profile
+                            and observed_profile.get("fork_observed") is True
+                            and "fork_id" in observed_profile
+                        )
+                        if fork_observed:
+                            fallback_profile["fork_id"] = observed_profile["fork_id"]
+                        if observed_profile and "likeability_level_10_enabled" in observed_profile:
+                            fallback_profile["likeability_level_10_enabled"] = (
+                                observed_profile["likeability_level_10_enabled"]
+                            )
+                        # Without a readable role page, an account-owned fork
+                        # pointer still outranks the graduation template.
+                        calculation_projection = (
+                            _current_role_calculation_projection({
+                                "profile": fallback_profile,
+                                "forks": (),
+                            })
+                            if saved_profile is not None or fork_observed else None
+                        )
                 if calculation_projection is not None:
                     default_weapon = calculation_projection["default_weapon"]
+                    default_fork_id = str(
+                        calculation_projection.get("default_fork_id") or ""
+                    )
                 roles_db[role_name] = {
                     "character_id": character_id,
                     "default_set": suit_name,
                     "default_weapon": default_weapon,
+                    "default_fork_id": default_fork_id,
                     "likeability_crit_rate_bonus": _likeability_crit_rate_bonus(
                         static_dao, user_dao, character_id,
+                        enabled_override=(
+                            calculation_projection.get("likeability_level_10_enabled")
+                            if calculation_projection is not None else None
+                        ),
                     ),
                     "active_fork_crit_rate_bonus": (
                         calculation_projection["active_fork_crit_rate_bonus"]
                         if calculation_projection is not None
                         else None
                     ),
+                    "active_fork_crit_source_resolved": calculation_projection is not None,
                     "extra_shape_label": extra_shape_label,
                     "extra_shape_buffs": extra_shape_buffs,
                     "weights": dict(scoring_role.get("weights") or {}),
@@ -281,4 +356,6 @@ def build_legacy_allocation_static_catalog(
         finally:
             if user_dao is not None:
                 user_dao.close()
-    return LegacyAllocationStaticCatalog(roles_db, sets_db, shapes_db, board_matrices)
+    return LegacyAllocationStaticCatalog(
+        roles_db, sets_db, shapes_db, board_matrices, fork_ids_by_name,
+    )

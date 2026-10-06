@@ -4,6 +4,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from copy import deepcopy
+
+from PySide6.QtCore import QObject, Signal
+
+from src.app.page_tasks import PageCommitLane, PageRequest, PageTaskLane
 
 from src.domain.stat_catalog import StatCatalog
 from src.features.configuration.dependencies import BasicWeightDependencies
@@ -70,11 +75,87 @@ _WEIGHT_POOL_PROPERTY_IDS = {
 }
 
 
-class BasicWeightController:
+class BasicWeightController(QObject):
     """Own the account-pinned boundary consumed by the Qt form."""
 
-    def __init__(self, dependencies: BasicWeightDependencies) -> None:
+    changed = Signal()
+
+    def __init__(self, dependencies: BasicWeightDependencies, parent: QObject | None = None) -> None:
+        super().__init__(parent)
         self.dependencies = dependencies
+        self._reads = PageTaskLane(self)
+        self._writes = PageCommitLane(self)
+        self._epoch = 0
+        self._closed = False
+        self._form_cache = None
+        self._form_cache_key = None
+
+    def is_writing(self) -> bool:
+        return self._writes.is_running()
+
+    def cancel_reads(self) -> None:
+        self._reads.cancel()
+
+    def request_form_data(self, apply, failed) -> None:
+        if not self._closed and not self.is_writing():
+            self._reads.submit(PageRequest(
+                (self.dependencies, self._epoch), lambda: deepcopy(self._cached_form()), apply, failed,
+            ))
+
+    def _form_source_key(self):
+        from pathlib import Path
+        from src.services.workshop_weight_template_service import configured_workshop_weight_template_file
+        template = configured_workshop_weight_template_file()
+        databases = self.dependencies.user_database_path, self.dependencies.static_database_path
+        files = [self.dependencies.config_dir / "stats.json"]
+        files.extend(path for database in databases for path in (database, Path(str(database) + "-wal")))
+        if template is not None:
+            files.append(template)
+        def stamp(path):
+            try:
+                stat = path.stat()
+                return str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns
+            except OSError:
+                return str(path), None
+        return tuple(stamp(path) for path in files)
+
+    def _cached_form(self):
+        key = self._form_source_key()
+        if self._form_cache is None or key != self._form_cache_key:
+            self._form_cache = self.load_form_data()
+            self._form_cache_key = key if key == self._form_source_key() else None
+        return self._form_cache
+
+    def submit_change(self, work, committed, failed, application_failed) -> bool:
+        if self._closed or self.is_writing():
+            return False
+        self._epoch += 1
+        self._reads.cancel()
+
+        def done(value):
+            self._form_cache_key = None
+            self.changed.emit()
+            committed(value)
+
+        return self._writes.submit(work, done, failed, application_failed)
+
+    def when_commit_settled(self, callback) -> None:
+        from PySide6.QtCore import Qt
+        self._writes.settled.connect(callback, Qt.ConnectionType.SingleShotConnection)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._reads.close()  # An accepted write always retains its completion callback.
+        if self._reads.is_running():
+            from PySide6.QtCore import Qt
+            self._reads.idle.connect(self._release_cache, Qt.ConnectionType.SingleShotConnection)
+        else:
+            self._release_cache()
+
+    def _release_cache(self):
+        self._form_cache = self._form_cache_key = None
 
     def operation(self) -> OperationContext:
         return OperationContext.create(
@@ -109,6 +190,7 @@ class BasicWeightController:
             self.dependencies.user_database_path,
             character_ids,
             static_database_path=self.dependencies.static_database_path,
+            persist_defaults=False,
         )
         with StaticGameDataDao(self.dependencies.static_database_path) as static_dao:
             attributes = {

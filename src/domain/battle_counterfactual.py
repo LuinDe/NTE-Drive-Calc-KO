@@ -38,6 +38,8 @@ class BattleMarginalResult:
     related_role_share_percent: float = 0.0
     role_share_percent: float = 0.0
     related_team_share_percent: float = 0.0
+    estimated_role_gain_percent: float | None = None
+    estimated_team_gain_percent: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

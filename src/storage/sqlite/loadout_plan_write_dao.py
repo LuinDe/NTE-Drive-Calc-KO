@@ -14,6 +14,7 @@ from src.services.virtual_equipment_service import (
 )
 
 from .allocation_plan_batch_dao import AllocationPlanBatchDaoMixin
+from .loadout_comparison_guard import assert_comparison_baseline
 from .user_data_support import (
     UserDataError,
     UserDataValidationError,
@@ -37,6 +38,7 @@ class LoadoutPlanWriteDaoMixin(AllocationPlanBatchDaoMixin):
         payload: Mapping[str, Any] | None = None,
         is_active: bool = False,
         slot_id: int | None = None,
+        comparison_baseline: Mapping[str, Any] | None = None,
     ) -> int:
         plan_name = str(name).strip()
         if not plan_name:
@@ -76,23 +78,24 @@ class LoadoutPlanWriteDaoMixin(AllocationPlanBatchDaoMixin):
                 "assignments": [
                     assignment for _serial, _slot, _kind, assignment in normalized
                 ],
+                "comparison_baseline": comparison_baseline,
             }])[0]
         role_name = str((payload or {}).get("source_role_name") or "").strip()
-        resolved_slot_id = (
-            self._resolve_loadout_slot_id(
-                raw_character_id,
-                slot_id,
-                default_name=role_name,
-            )
-            if slot_id is not None
-            else None
-        )
         connection = self._db()
         now = _utc_now()
         owns_transaction = not connection.in_transaction
         try:
             if owns_transaction:
                 connection.execute("BEGIN IMMEDIATE")
+            resolved_slot_id = (
+                self._resolve_loadout_slot_id(
+                    raw_character_id, slot_id, default_name=role_name,
+                )
+                if slot_id is not None
+                else None
+            )
+            if resolved_slot_id is not None:
+                assert_comparison_baseline(self, resolved_slot_id, comparison_baseline)
             cursor = connection.execute(
                 """
                 INSERT INTO loadout_plan(
@@ -139,6 +142,10 @@ class LoadoutPlanWriteDaoMixin(AllocationPlanBatchDaoMixin):
             if owns_transaction:
                 connection.rollback()
             raise UserDataError("장착 방안을 저장할 수 없습니다") from exc
+        except BaseException:
+            if owns_transaction:
+                connection.rollback()
+            raise
 
     def _repair_active_loadout_plan_conflicts_in_transaction(
         self,
@@ -394,6 +401,7 @@ class LoadoutPlanWriteDaoMixin(AllocationPlanBatchDaoMixin):
                     float(plan["score"]) if plan.get("score") is not None else None
                 ),
                 "payload": dict(plan.get("payload") or {}),
+                "comparison_baseline": plan.get("comparison_baseline"),
                 "assignments": normalized_assignments,
             })
         if not normalized_plans:
@@ -403,6 +411,7 @@ class LoadoutPlanWriteDaoMixin(AllocationPlanBatchDaoMixin):
         now = _utc_now()
 
         def insert_plan(plan: Mapping[str, Any], *, is_active: bool = True) -> int:
+            assert_comparison_baseline(self, plan["slot_id"], plan.get("comparison_baseline"))
             cursor = connection.execute(
                 """
                 INSERT INTO loadout_plan(

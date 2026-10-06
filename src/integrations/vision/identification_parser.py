@@ -202,7 +202,7 @@ def _looks_like_single_reward_scene(lines: list[dict], image_shape: tuple[int, i
         text = str(line.get("text", "") or "").replace(" ", "")
         if "倒带获得" in text:
             return True
-        if "카트리지" not in text:
+        if "卡带" not in text:
             continue
         x1, y1, x2, y2 = line.get("box", (0, 0, 0, 0))
         cx = (x1 + x2) / 2

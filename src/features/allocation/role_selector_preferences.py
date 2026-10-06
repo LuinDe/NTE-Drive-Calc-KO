@@ -278,7 +278,9 @@ class RoleSelectorPreferencesMixin:
             current_cap = automatic_cap
         if current_cap is not None:
             crit_cap_edit.setText(f"{float(current_cap):g}")
-        crit_cap_edit.setPlaceholderText("비우면 제한 없음")
+        crit_cap_edit.setPlaceholderText(
+            "아크 상시 자료 검토 대기" if current_cap is None else "비우면 제한 없음"
+        )
 
         cap_text_edited = False
         weapon_changed = False
@@ -288,14 +290,22 @@ class RoleSelectorPreferencesMixin:
             weapon_changed = True
             raw = str(text or "").strip()
             resolved = resolve_optional_priority_choice(weapon_names, raw)
-            cap = (
-                self._automatic_crit_rate_cap(name, resolved)
+            fork_cap = (
+                self._weapon_crit_rate_cap(resolved)
                 if resolved in weapon_names else None
+            )
+            cap = (
+                round(max(0.0, fork_cap - self._likeability_crit_rate(name) * 100.0), 4)
+                if fork_cap is not None
+                else None
             )
             if cap is not None:
                 crit_cap_edit.setText(f"{float(cap):g}")
             else:
                 crit_cap_edit.clear()
+            crit_cap_edit.setPlaceholderText(
+                "아크 상시 자료 검토 대기" if cap is None else "비우면 제한 없음"
+            )
             cap_text_edited = False
 
         def mark_cap_text_edited(_text):
@@ -303,6 +313,10 @@ class RoleSelectorPreferencesMixin:
             cap_text_edited = True
 
         weapon_combo.currentTextChanged.connect(apply_weapon_cap)
+        weapon_combo.activated.connect(
+            lambda _index: apply_weapon_cap(weapon_combo.currentText())
+        )
+        weapon_combo.completer().activated[str].connect(apply_weapon_cap)
         crit_cap_edit.textEdited.connect(mark_cap_text_edited)
         crit_row.addWidget(crit_cap_edit, 1)
         crit_row.addWidget(QLabel("%"))
@@ -494,7 +508,13 @@ class RoleSelectorPreferencesMixin:
                 cap = configured_cap
             else:
                 cap = self._automatic_crit_rate_cap(name, self._effective_weapon_for_role(name))
-            if cap is not None and float(cap) > 0.0:
+            automatic = cap_source == "automatic" or configured_cap is None
+            if automatic and cap is None:
+                # Preserve an unknown automatic source in the frozen request;
+                # absence means the player explicitly disabled the cap with 0.
+                caps[name] = None
+                continue
+            if cap is not None and (float(cap) > 0.0 or automatic):
                 caps[name] = float(cap)
         return caps
 
@@ -535,6 +555,11 @@ class RoleSelectorPreferencesMixin:
             "custom_sets": self.get_custom_sets(),
             "custom_set_overrides": self.get_custom_sets(),
             "custom_weapons": self.get_custom_weapons(),
+            # Older files saved every effective default; only this marker
+            # distinguishes a deliberate same-name fork correction.
+            "custom_weapon_selections": sorted(
+                name for name in self.selected if name in self.custom_weapons
+            ),
             "crit_rate_caps": {
                 name: float(self.crit_rate_caps[name])
                 for name in self.selected
@@ -599,10 +624,22 @@ class RoleSelectorPreferencesMixin:
                 data = json.load(f)
             self.selected, self.priority_links = load_priority_selection(data, self.all_roles)
             self.custom_sets = self._load_custom_set_overrides(data)
+            raw_weapon_selections = data.get("custom_weapon_selections")
+            # Without the marker, a saved default name was not a user choice.
+            explicit_weapon_roles = (
+                {role for role in raw_weapon_selections if isinstance(role, str)}
+                if isinstance(raw_weapon_selections, list)
+                else None
+            )
             self.custom_weapons = {
                 role: weapon
                 for role, weapon in data.get("custom_weapons", {}).items()
                 if role in self.all_roles and weapon and (not self.weapons_db or weapon in self.weapons_db)
+                and (
+                    role in explicit_weapon_roles
+                    if explicit_weapon_roles is not None
+                    else weapon != self._default_weapon_for_role(role)
+                )
             }
             self.crit_rate_caps = {}
             self.crit_rate_cap_sources = {}

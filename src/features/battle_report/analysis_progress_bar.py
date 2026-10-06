@@ -48,6 +48,7 @@ class BattleAnalysisProgressBar(QFrame):
         self.hide()
 
     def show_for(self, kind: str) -> None:
+        self.progress.show()
         self.progress.setRange(0, 100)
         self.progress.setValue(1)
         self.progress.setFormat('%p%')
@@ -58,6 +59,7 @@ class BattleAnalysisProgressBar(QFrame):
         self.show()
 
     def update_progress(self, progress: BattleAnalysisProgress) -> None:
+        self.progress.show()
         message = progress.message
         if progress.overall_percent is not None:
             self.progress.setRange(0, 100)
@@ -84,3 +86,9 @@ class BattleAnalysisProgressBar(QFrame):
 
     def finish(self) -> None:
         self.hide()
+
+    def show_error(self, message: str) -> None:
+        self.progress.hide()
+        self.message_label.setWordWrap(True)
+        self.message_label.setText(message)
+        self.show()

@@ -76,7 +76,7 @@ def allow_operation_entry(parent, policy, capability: str, feature: str, navigat
     if entry_is_allowed(policy, capability):
         return True
     mode = _MODE_LABELS[policy.settings.mode.value]
-    detail = "현재" + mode + "이 모드에서는 이 기능을 사용할 수 없습니다.\n" + _REQUIREMENTS[capability]
+    detail = "현재 " + mode + " 모드에서는 이 기능을 사용할 수 없습니다.\n" + _REQUIREMENTS[capability]
     prompt_operation_settings(parent, title="기능 제한됨", feature=feature, detail=detail,
                               navigate=navigate, target="mode")
     return False
@@ -86,7 +86,7 @@ def explain_operation_unavailable(parent, feature: str, detail: str, navigate, t
     target = target if target in {"deployment", "home"} else "detection"
     if target == "home":
         prompt_operation_settings(
-            parent, title="일시적으로 동기화할 수 없음", feature=feature, detail=detail,
+            parent, title="기능 일시 사용 불가", feature=feature, detail=detail,
             navigate=navigate, target=target, action_text="워크스페이스로 이동",
         )
         return

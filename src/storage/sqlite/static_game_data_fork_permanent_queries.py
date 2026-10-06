@@ -8,6 +8,7 @@ from typing import Any
 from .fork_permanent_projection import (
     FORK_PERMANENT_EVIDENCE_SQL,
     FORK_REFINEMENT_LEVEL_SQL,
+    FORK_SOURCE_COVERAGE_SQL,
     resolve_projection_rows,
 )
 
@@ -34,6 +35,7 @@ class ForkPermanentPropertyProjectionMixin(StaticDataDaoMixinHost):
         resolved, _audit = resolve_projection_rows(
             self._rows(FORK_PERMANENT_EVIDENCE_SQL),
             self._rows(FORK_REFINEMENT_LEVEL_SQL),
+            self._rows(FORK_SOURCE_COVERAGE_SQL),
         )
         by_fork: dict[str, list[dict[str, Any]]] = {}
         for value in resolved:

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -18,10 +17,9 @@ from src.domain.rewind_shape_recommendation import (
     target_grade_score,
     target_percentage_score,
 )
-from src.domain.loadout_plan_scores import assignment_score_key
 from src.domain.role_name_order import role_name_sort_key
-from src.optimizer.scoring import ScoringEngine
-from src.services.equipment_scoring_service import score_drive_stats
+from src.domain.rewind_loadout import RewindSlotReference, RewindSlotSummary, positive_id
+from src.services.rewind_loadout_reader import RewindLoadoutReader, snapshot_complete
 from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
 from src.storage.sqlite.user_data_dao import UserDataDao
 
@@ -41,6 +39,9 @@ class RewindShapeAnalysis:
     required_count: int = 0
     strategy: str = "balanced"
     owned_shape_counts: tuple[tuple[str, int], ...] = ()
+    selected_slots: tuple[RewindSlotReference, ...] = ()
+    static_identity: tuple[str, int, int] | None = None
+    selected_source_snapshots: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +50,7 @@ class RewindTargetRole:
     name: str
     default_suit_id: str | None
     is_custom: bool = False
-    calculation_score: float | None = None
+    slots: tuple[RewindSlotSummary, ...] = ()
 
 
 class RewindShapeRecommendationService:
@@ -78,16 +79,41 @@ class RewindShapeRecommendationService:
         value = copies.get("rewind_recommendation") if isinstance(copies, dict) else None
         return dict(value) if isinstance(value, dict) else {}
 
-    def save_preferences(self, value: dict[str, object]) -> None:
+    def save_preferences(self, value: dict[str, object], *,
+                         expected_slots: tuple[RewindSlotReference, ...] = (), static_identity=None) -> None:
+        if expected_slots and static_identity != self.static_identity():
+            raise ValueError("계산에 사용한 정적 데이터가 변경되었습니다. 되감기 추천을 닫았다가 다시 연 뒤 생성하세요.")
         with self._user_dao_factory(self._user_database_path) as user_dao:
-            saver = getattr(user_dao, "replace_application_setting_copy", None)
-            if callable(saver):
-                saver("rewind_recommendation", value)
+            if "slot_selection_version" in value:
+                version = value["slot_selection_version"]
+                if type(version) is not int or version not in {1, 2}:
+                    raise ValueError("슬롯 선호 설정의 버전 또는 형식이 유효하지 않습니다")
+                if version == 1:
+                    maps = {"legacy": value.get("selected_slots")}
+                else:
+                    maps = value.get("selected_slots_by_strategy")
+                    if not isinstance(maps, dict) or set(maps) != {"balanced", "focused"}:
+                        raise ValueError("슬롯 선호 설정의 버전 또는 형식이 유효하지 않습니다")
+                for selected in maps.values():
+                    if not isinstance(selected, dict):
+                        raise ValueError("슬롯 선호 설정의 버전 또는 형식이 유효하지 않습니다")
+                    for key, slot_id in selected.items():
+                        identifier = positive_id(key)
+                        if identifier is None or (slot_id is not None and (type(slot_id) is not int or slot_id <= 0)):
+                            raise ValueError("슬롯 선호 설정의 식별 정보가 유효하지 않습니다")
+                        slot = user_dao.get_loadout_slot(slot_id) if slot_id is not None else None
+                        if slot is not None and slot["character_id"] != identifier:
+                            raise ValueError("슬롯이 선택한 캐릭터의 것이 아닙니다")
+            if expected_slots:
+                user_dao.replace_application_setting_copy("rewind_recommendation", value,
+                    expected_loadout_plans=tuple({"character_id": ref.character_id, "slot_id": ref.slot_id,
+                                                 "plan_id": ref.plan_id} for ref in expected_slots))
+            else:
+                user_dao.replace_application_setting_copy("rewind_recommendation", value)
 
-    def analyze(self, *, selection_limit: int = 8) -> RewindShapeAnalysis:
-        return self.analyze_for_targets(selection_limit=selection_limit)
-
-    def list_target_roles(self) -> tuple[RewindTargetRole, ...]:
+    def list_target_roles(self, *, checkpoint=lambda: None) -> tuple[RewindTargetRole, ...]:
+        checkpoint()
+        identity = self.static_identity()
         with self._static_dao_factory(self._static_database_path) as static_dao:
             # The static catalog contains combat transformations and two avatar
             # variants under the same display name.  Neither is a separate
@@ -117,42 +143,17 @@ class RewindShapeRecommendationService:
                     key=lambda row: role_name_sort_key(str(row.get("name_zh") or row["character_id"])),
                 )
             ]
-        calculation_scores: dict[int, float] = {}
+        slots_by_character = {}
         if self._user_database_path.is_file():
-            with self._user_dao_factory(self._user_database_path) as user_dao:
-                custom_roles = getattr(user_dao, "list_custom_characters", lambda: [])()
-                slot_plans = getattr(
-                    user_dao,
-                    "list_current_loadout_slot_plans",
-                    lambda: [],
-                )()
-                for row in slot_plans:
-                    slot = row.get("slot") or {}
-                    plan = row.get("plan") or {}
-                    payload = plan.get("payload") or {}
-                    if payload.get("schema") not in {
-                        "allocation-official-snapshot-v1",
-                        "game-observed-loadout-v1",
-                    } or (
-                        payload.get("schema") == "game-observed-loadout-v1"
-                        and payload.get("source") != "game_inventory"
-                    ):
-                        continue
-                    character_id = plan.get("character_id") or slot.get("character_id")
-                    score = plan.get("score")
-                    if character_id is None or score is None or isinstance(score, bool):
-                        continue
-                    try:
-                        numeric_score = float(score)
-                    except (TypeError, ValueError):
-                        continue
-                    if not math.isfinite(numeric_score):
-                        continue
-                    identifier = int(character_id)
-                    calculation_scores[identifier] = max(
-                        numeric_score,
-                        calculation_scores.get(identifier, numeric_score),
-                    )
+            with self._user_dao_factory(self._user_database_path) as user_dao, self._static_dao_factory(self._static_database_path) as static_dao:
+                with user_dao.read_consistent_state():
+                    custom_roles = user_dao.list_custom_characters()
+                    reader = RewindLoadoutReader(user_dao, static_dao.list_shapes())
+                    visible_slots = user_dao.list_visible_loadout_slots_with_plans()
+                    for slot in visible_slots:
+                        checkpoint()
+                        identifier = int(slot["character_id"])
+                        slots_by_character.setdefault(identifier, []).append(reader.inspect(slot))
             known_ids = {role.character_id for role in roles}
             roles.extend(
                 RewindTargetRole(
@@ -171,10 +172,13 @@ class RewindShapeRecommendationService:
         roles = [
             replace(
                 role,
-                calculation_score=calculation_scores.get(role.character_id),
+                slots=tuple(slots_by_character.get(role.character_id, ())),
             )
             for role in roles
         ]
+        checkpoint()
+        if identity != self.static_identity():
+            raise ValueError("정적 자료가 변경되었습니다. 되감기 추천을 닫고 다시 여세요.")
         return tuple(sorted(
             roles, key=lambda role: (role_name_sort_key(role.name), role.character_id),
         ))
@@ -188,228 +192,96 @@ class RewindShapeRecommendationService:
         counts: Counter[str] = Counter()
         if self._user_database_path.is_file():
             with self._user_dao_factory(self._user_database_path) as user_dao:
-                snapshot_id = user_dao.current_inventory_snapshot_id()
-                if snapshot_id is not None:
-                    counts.update(
-                        shape_id
-                        for row in user_dao.list_inventory_items(snapshot_id, kind="module")
-                        if (
-                            shape_id := _official_shape_id(
-                                str(row.get("geometry") or ""),
-                                known_shape_ids,
-                            )
+                with user_dao.read_consistent_state():
+                    snapshot_id = user_dao.current_inventory_snapshot_id()
+                    summary = user_dao.inventory_snapshot_summary(snapshot_id) if snapshot_id is not None else None
+                    if snapshot_complete(summary):
+                        counts.update(
+                            shape_id for row in user_dao.list_inventory_items(snapshot_id, kind="module")
+                            if (shape_id := _official_shape_id(str(row.get("geometry") or ""), known_shape_ids))
                         )
-                    )
         return tuple((shape_id, int(counts[shape_id])) for shape_id in shape_ids)
 
     def analyze_for_targets(
-        self,
-        *,
-        target_character_ids: tuple[int, ...] = (),
-        strategy: str = "balanced",
-        primary_character_ids: tuple[int, ...] = (),
-        primary_character_id: int | None = None,
-        selection_limit: int = 8,
-        target_grade: str = "S",
-        target_custom_percent: float | None = None,
+        self, *, selected_slots: tuple[RewindSlotReference, ...],
+        target_character_ids: tuple[int, ...] = (), strategy: str = "balanced",
+        primary_character_ids: tuple[int, ...] = (), primary_character_id: int | None = None,
+        selection_limit: int = 8, target_grade: str = "S", target_custom_percent: float | None = None,
+        checkpoint: Callable[[], None] = lambda: None,
     ) -> RewindShapeAnalysis:
         if strategy not in {"balanced", "focused"}:
             raise ValueError(f"unknown rewind strategy: {strategy}")
-        if not target_character_ids:
-            raise ValueError("먼저 육성 캐릭터를 선택한 뒤 추천을 생성하세요.")
+        selected_ids = set(primary_character_ids if strategy == "focused" else target_character_ids)
+        if strategy == "focused" and primary_character_id is not None:
+            selected_ids.add(primary_character_id)
+        if not selected_ids:
+            raise ValueError("먼저 이번 전략에 참여할 캐릭터를 선택한 뒤 추천을 생성하세요.")
+        if any(type(value) is not int or value <= 0 for value in selected_ids):
+            raise ValueError("캐릭터 선택 데이터가 유효하지 않습니다. 다시 선택하세요.")
         target_label = _target_label(target_grade, target_custom_percent)
-        role_names: dict[int, str] = {}
-        with self._static_dao_factory(self._static_database_path) as static_dao:
-            role_names = {
-                int(row["character_id"]): str(row.get("name_zh") or row["character_id"])
-                for row in getattr(static_dao, "list_characters", lambda: [])()
-            }
-            shapes = tuple(
-                RewindShape(
-                    shape_id=str(row["shape_id"]),
-                    cell_count=int(row["cell_count"]),
-                )
-                for row in static_dao.list_shapes()
-            )
+        if not self._user_database_path.is_file():
+            raise ValueError("저장된 방안이 아직 없습니다. 먼저 계산하고 저장하세요.")
+        checkpoint()
+        identity = self.static_identity()
+        with self._static_dao_factory(self._static_database_path) as static_dao, self._user_dao_factory(self._user_database_path) as dao:
+            shape_rows = static_dao.list_shapes()
+            shapes = tuple(RewindShape(str(row["shape_id"]), int(row["cell_count"])) for row in shape_rows)
             known_shape_ids = {shape.shape_id for shape in shapes}
-            attribute_names = {
-                str(row.get("attribute_id") or ""): ScoringEngine._scoring_property_name(row)
-                for row in getattr(static_dao, "list_equipment_attributes", lambda: [])()
-            }
-
-        snapshot_id: int | None = None
-        snapshot_source = ""
-        owned_shape_counts: Counter[str] = Counter()
-        module_rows: list[dict[str, Any]] = []
-        if self._user_database_path.is_file():
-            with self._user_dao_factory(self._user_database_path) as user_dao:
-                snapshot_id = user_dao.current_inventory_snapshot_id()
-                if snapshot_id is not None:
-                    summary = user_dao.inventory_snapshot_summary(snapshot_id) or {}
-                    snapshot_source = str(summary.get("source") or "")
-                    module_rows = list(user_dao.list_inventory_items(
-                        snapshot_id,
-                        kind="module",
-                    ))
-                    owned_shape_counts.update(
-                        _official_shape_id(
-                            str(row.get("geometry") or ""),
-                            known_shape_ids,
-                        )
-                        for row in module_rows
-                        if _official_shape_id(
-                            str(row.get("geometry") or ""),
-                            known_shape_ids,
-                        )
-                    )
-        shortfalls: Counter[str] = Counter()
-        score_gaps: Counter[str] = Counter()
-        if self._user_database_path.is_file():
-            with self._user_dao_factory(self._user_database_path) as user_dao:
-                for custom in getattr(user_dao, "list_custom_characters", lambda: [])():
-                    character_id = int(custom["character_id"])
-                    role_names[character_id] = str(custom.get("name_zh") or character_id)
-                # This is the sole modern source of recommendation inputs: each
-                # visible current slot is a saved calculation/loadout plan. A role
-                # may own multiple slots and every slot must contribute. Blueprint
-                # candidates are deliberately outside this DAO projection.
-                slot_rows = getattr(user_dao, "list_current_loadout_slot_plans", lambda: [])()
-                active_plans: dict[int, list[dict[str, Any]]] = {}
-                for row in slot_rows:
-                    slot = row.get("slot") or {}
-                    plan = row.get("plan") or {}
-                    character_id = plan.get("character_id") or slot.get("character_id")
-                    if character_id is None:
+            role_names = {int(row["character_id"]): str(row.get("name_zh") or row["character_id"])
+                          for row in static_dao.list_characters()}
+            with dao.read_consistent_state():
+                role_names.update({int(row["character_id"]): str(row.get("name_zh") or row["character_id"])
+                                   for row in dao.list_custom_characters()})
+                snapshot_id = dao.current_inventory_snapshot_id()
+                summary = dao.inventory_snapshot_summary(snapshot_id) if snapshot_id is not None else None
+                if not snapshot_complete(summary):
+                    raise ValueError("현재 인벤토리 데이터가 완전하지 않습니다. 먼저 가방을 동기화한 뒤 추천을 생성하세요.")
+                snapshot_source = str(summary.get("source") or "")
+                owned_shape_counts = Counter()
+                for item in dao.list_inventory_items(snapshot_id, kind="module"):
+                    shape_id = _official_shape_id(str(item.get("geometry") or ""), known_shape_ids)
+                    if shape_id:
+                        owned_shape_counts[shape_id] += 1
+                references = {}
+                for ref in selected_slots:
+                    if not isinstance(ref, RewindSlotReference) or positive_id(ref.character_id) is None:
+                        raise ValueError("슬롯 선택 데이터가 유효하지 않습니다. 다시 선택하세요.")
+                    if ref.character_id in references:
+                        raise ValueError("한 캐릭터당 장비 세팅 슬롯은 하나만 선택할 수 있습니다.")
+                    references[ref.character_id] = ref
+                reader, validated, problems = RewindLoadoutReader(dao, shape_rows), [], []
+                for identifier in sorted(selected_ids):
+                    checkpoint()
+                    name, ref = role_names.get(identifier, str(identifier)), references.get(identifier)
+                    if ref is None:
+                        problems.append(f"{name}의 장비 세팅 슬롯이 아직 선택되지 않았습니다. 먼저 선택하세요.")
                         continue
-                    active_plans.setdefault(int(character_id), []).append(plan)
-                if not active_plans:
-                    legacy_plans = getattr(
-                        user_dao,
-                        "list_active_loadout_plans_by_role",
-                        lambda: {},
-                    )()
-                    for role_name, plan in legacy_plans.items():
-                        character_id = plan.get("character_id")
-                        if character_id is None:
-                            character_id = next(
-                                (key for key, value in role_names.items() if value == role_name),
-                                None,
-                            )
-                        if character_id is not None:
-                            active_plans.setdefault(int(character_id), []).append(plan)
-                selected_ids = set(target_character_ids)
-                if strategy == "focused":
-                    selected_ids = {int(value) for value in primary_character_ids}
-                    if primary_character_id is not None:
-                        selected_ids.add(int(primary_character_id))
-                if strategy == "focused" and not selected_ids:
-                    raise ValueError("먼저 집중 캐릭터를 선택한 뒤 소수 집중 추천을 생성하세요.")
-
-                # A saved plan is immutable with respect to its source snapshot.
-                # The current inventory can have changed after the plan was saved,
-                # so resolving its assignments against the latest snapshot silently
-                # dropped every historical UID and produced a false zero shortfall.
-                rows_by_snapshot: dict[int, dict[tuple[int, int], dict[str, Any]]] = {}
-                if snapshot_id is not None:
-                    rows_by_snapshot[int(snapshot_id)] = {
-                        _item_uid(row): row for row in module_rows
-                    }
-
-                def plan_items(plan: dict[str, Any]) -> dict[tuple[int, int], dict[str, Any]]:
-                    source_snapshot_id = plan.get("source_snapshot_id")
-                    resolved_snapshot_id = (
-                        int(source_snapshot_id)
-                        if source_snapshot_id is not None
-                        else snapshot_id
-                    )
-                    if resolved_snapshot_id is None:
-                        return {}
-                    if resolved_snapshot_id not in rows_by_snapshot:
-                        rows_by_snapshot[resolved_snapshot_id] = {
-                            _item_uid(row): row
-                            for row in user_dao.list_inventory_items(
-                                resolved_snapshot_id,
-                                kind="module",
-                            )
-                        }
-                    return rows_by_snapshot[resolved_snapshot_id]
-
-                missing_plans: list[str] = []
-                missing_items: list[str] = []
-                compatibility_engine: ScoringEngine | None = None
-                for character_id in selected_ids:
-                    role_name = role_names.get(character_id, str(character_id))
-                    plans_for_role = active_plans.get(character_id, [])
-                    # Both calculated plans and game-loadout imports promoted into a
-                    # saved calculation plan are active plan inputs. Blueprints are
-                    # never returned by this DAO boundary.
-                    if not plans_for_role:
-                        missing_plans.append(role_name)
+                    slot = dao.get_loadout_slot(ref.slot_id) if positive_id(ref.slot_id) else None
+                    plan = (slot or {}).get("current_plan") or {}
+                    if (slot is None or slot.get("is_archived") or int(slot["character_id"]) != identifier
+                            or plan.get("plan_id") != ref.plan_id):
+                        problems.append(f"{name}의 선택한 장비 세팅이 변경되었습니다. 되감기 추천을 닫았다가 다시 연 뒤 선택하세요.")
                         continue
-                    for plan in plans_for_role:
-                        scores = (plan.get("payload") or {}).get("assignment_scores") or {}
-                        items_by_uid = plan_items(plan)
-                        for assignment in plan.get("assignments") or ():
-                            if assignment.get("kind") != "module":
-                                continue
-                            item = items_by_uid.get(_item_uid(assignment))
-                            if item is None:
-                                missing_items.append(role_name)
-                                continue
-                            shape_id = _official_shape_id(
-                                str(item.get("geometry") or ""),
-                                known_shape_ids,
-                            )
-                            if not shape_id:
-                                continue
-                            score_value = scores.get(assignment_score_key(assignment))
-                            if score_value is None:
-                                raw_assignment = assignment.get("raw_assignment")
-                                score_value = (
-                                    raw_assignment.get("score")
-                                    if isinstance(raw_assignment, dict)
-                                    else None
-                                )
-                            if score_value is None:
-                                # Plans saved before per-drive scores were persisted
-                                # still contain complete drives and their fixed
-                                # snapshot. Rebuild only this legacy missing field
-                                # with the application's normal scoring rule; newly
-                                # saved plans take the direct persisted-score path.
-                                compatibility_engine = compatibility_engine or ScoringEngine(
-                                    user_database_path=self._user_database_path,
-                                )
-                                score_value = _legacy_drive_score(
-                                    item,
-                                    role_name=role_name,
-                                    score_area=int(item.get("grid_count") or 0),
-                                    attribute_names=attribute_names,
-                                    engine=compatibility_engine,
-                                )
-                            shape_cells = next(
-                                shape.cell_count for shape in shapes if shape.shape_id == shape_id
-                            )
-                            # ``grid_count`` is the scoring area used by the same
-                            # grade thresholds shown in a saved loadout. The score
-                            # itself is the persisted per-drive score; it is never
-                            # recalculated here.
-                            score_area = int(item.get("grid_count") or shape_cells)
-                            threshold = (
-                                target_percentage_score(target_custom_percent, score_area)
-                                if target_custom_percent is not None
-                                else target_grade_score(target_grade, score_area)
-                            )
-                            gap = max(0.0, threshold - float(score_value))
-                            if gap > 0:
-                                shortfalls[shape_id] += 1
-                                score_gaps[shape_id] += gap
-            if missing_plans:
-                raise ValueError(f"{ '、'.join(missing_plans) }의 계산 방안이 아직 생성되지 않았습니다. 먼저 방안을 생성하세요.")
-            if missing_items:
-                raise ValueError(
-                    f"{ '、'.join(sorted(set(missing_items))) }의 계산 방안 출처 스냅샷에"
-                    "장착된 드라이브가 없어 저장된 점수를 읽을 수 없습니다."
-                )
+                    row = reader.inspect(slot)
+                    if row.state != "ready":
+                        problems.append(f"{name}의 “{row.slot_name}” 슬롯: {row.reason}")
+                    else:
+                        validated.append(row)
+                if problems:
+                    raise ValueError("\n".join(problems))
+        shortfalls, score_gaps = Counter(), Counter()
+        for slot in validated:
+            checkpoint()
+            for drive in slot.drives:
+                threshold = (target_percentage_score(target_custom_percent, drive.area)
+                             if target_custom_percent is not None else target_grade_score(target_grade, drive.area))
+                gap = max(0.0, threshold - drive.score)
+                if gap > 0:
+                    shortfalls[drive.shape_id] += 1
+                    score_gaps[drive.shape_id] += gap
+        frozen_references = tuple(row.reference for row in validated)
+        checkpoint()
+        self.validate_selection(frozen_references, identity)
         pricing_rule = RewindPricingRule()
         notice = ""
         recommendations = recommend_score_shortfall_shapes(
@@ -439,6 +311,8 @@ class RewindShapeRecommendationService:
         plans = (RewindPlan(strategy, labels[strategy], recommendations, benefit, cost),) if recommendations else ()
         return RewindShapeAnalysis(
             snapshot_id=snapshot_id,
+            selected_slots=frozen_references, static_identity=identity,
+            selected_source_snapshots=tuple((row.reference.slot_id, row.source_snapshot_id) for row in validated),
             snapshot_source=snapshot_source,
             shape_count=len(shapes),
             selection_limit=selection_limit,
@@ -453,6 +327,20 @@ class RewindShapeRecommendationService:
                 for shape in shapes
             ),
         )
+
+    def static_identity(self):
+        stat = self._static_database_path.stat()
+        return str(self._static_database_path.resolve()), stat.st_size, stat.st_mtime_ns
+
+    def validate_selection(self, references, static_identity):
+        if static_identity != self.static_identity():
+            raise ValueError("계산에 사용한 정적 데이터가 변경되었습니다. 되감기 추천을 닫았다가 다시 연 뒤 생성하세요.")
+        with self._user_dao_factory(self._user_database_path) as dao, dao.read_consistent_state():
+            for ref in references:
+                slot = dao.get_loadout_slot(ref.slot_id)
+                if (slot is None or slot.get("is_archived") or slot["character_id"] != ref.character_id
+                        or ((slot.get("current_plan") or {}).get("plan_id")) != ref.plan_id):
+                    raise ValueError("선택한 장비 세팅이 변경되었습니다. 되감기 추천을 닫았다가 다시 연 뒤 생성하세요.")
 
 
 def _target_label(target_grade: str, target_custom_percent: float | None) -> str:
@@ -473,11 +361,6 @@ def _official_shape_id(value: str, known_shape_ids: set[str]) -> str:
     return candidate if candidate in known_shape_ids else ""
 
 
-def _item_uid(row: dict[str, Any]) -> tuple[int, int]:
-    """Return the stable UID tuple shared by snapshot rows and assignments."""
-
-    return (int(row.get("uid_slot") or 0), int(row.get("uid_serial") or 0))
-
 
 def _role_picker_order(character: dict[str, Any]) -> tuple[int, int, int]:
     """Choose one canonical picker record for a duplicated display name."""
@@ -489,36 +372,4 @@ def _role_picker_order(character: dict[str, Any]) -> tuple[int, int, int]:
         1 if avatar_variant else 0,
         0 if avatar_variant and "female" in actor_path else 1,
         int(character["character_id"]),
-    )
-
-
-def _legacy_drive_score(
-    item: dict[str, Any],
-    *,
-    role_name: str,
-    score_area: int,
-    attribute_names: dict[str, str],
-    engine: ScoringEngine,
-) -> float:
-    """Fill a missing historical single-drive score using the normal scorer."""
-
-    role = engine.roles_db.get(role_name) or {}
-    weights = role.get("weights") if isinstance(role, dict) else None
-    sub_stat_names = [
-        attribute_names.get(str(stat.get("property_id") or ""), "")
-        for stat in item.get("sub_stats") or ()
-        if isinstance(stat, dict)
-    ]
-    quality = {
-        "orange": "Gold",
-        "gold": "Gold",
-        "purple": "Purple",
-        "blue": "Blue",
-    }.get(str(item.get("quality") or "Gold").casefold(), str(item.get("quality") or "Gold"))
-    return score_drive_stats(
-        engine,
-        sub_stat_names=(name for name in sub_stat_names if name),
-        area=max(1, score_area),
-        weights=weights if isinstance(weights, dict) else {},
-        quality=quality,
     )

@@ -16,7 +16,9 @@ from src.app.theme import theme_color
 from src.features.official_role.page import (
     build_official_role_page,
     refresh_official_role_page,
+    deactivate_official_role_page,
 )
+from src.features.configuration.page import deactivate_config_page
 from src.features.inventory.equipment_display_view import (
     build_equipment_mode_switch,
 )
@@ -179,18 +181,15 @@ class MainWindowNavigationMixin:
         if item.required_capability and not self.operation_entry(item.required_capability, item.label.strip()):
             return
         indexes = nav_index_map()
-        if (
-            self._nav_key_for_index(self.stack.currentIndex()) == "config"
-            and item.key != "config"
-            and not self._confirm_leave_config_page()
-        ):
+        from src.ui.controllers.configuration_controller import defer_page_transition
+        current = self._nav_key_for_index(self.stack.currentIndex())
+        if defer_page_transition(self, lambda: self._go(page), pages=(current,) if current != item.key else ()):
             return
-        if (
-            self._nav_key_for_index(self.stack.currentIndex()) == "my_role"
-            and item.key != "my_role"
-            and not self._confirm_leave_my_role_page()
-        ):
-            return
+        if current != item.key:
+            if current == "my_role":
+                deactivate_official_role_page(self)
+            elif current == "config":
+                deactivate_config_page(self)
         self.stack.setCurrentIndex(indexes.get(item.key, 0))
         self.topbar_title.setText(item.label)
         self.topbar_catalog_return.setVisible(item.key == "static_catalog")
@@ -207,6 +206,9 @@ class MainWindowNavigationMixin:
     def _refresh_navigation_item(self, item) -> None:
         """Refresh one built page through its public feature boundary."""
 
+        if item.key in {"equipment", "identify", "warehouse"} and not getattr(self, "_allocation_catalog_ready", True):
+            self._refresh_execute()
+            return  # Completion refreshes only the still-visible dependent page.
         if not item.refresh_method:
             return
         if item.key == "identify":

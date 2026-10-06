@@ -5,10 +5,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 
 from src.domain.progression_material_conversion import allocate_owned
+from src.domain.cultivation_history import HistoryCalculationEnvelope
 from src.domain.progression_stamina import FarmingStage, ProgressionStaminaResult
 from src.services.cultivation_planner_service import (
     CultivationMaterial,
@@ -43,6 +44,7 @@ class CultivationBatchRequest:
     ordered_targets: tuple[CultivationTargetDraft, ...]
     owned_quantities: tuple[tuple[str, int], ...] = ()
     trace_id: int = 0
+    history_envelope: HistoryCalculationEnvelope | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +91,23 @@ class CultivationBatchPlan:
     stamina_item_ids: frozenset[str] = frozenset()
     owned_inputs: tuple[CultivationMaterial, ...] = ()
     trace_id: int = 0
+    preparation: CultivationBatchPreparation | None = None
+    history_envelope: HistoryCalculationEnvelope | None = None
+    dataset_metadata: tuple[tuple[str, object], ...] = ()
+    history_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CultivationBatchPreparation:
+    account_id: str
+    generation: object
+    dataset_identity: str
+    ordered_targets: tuple[CultivationTargetDraft, ...]
+    target_plans: tuple[tuple[CultivationTargetDraft, CultivationPlan], ...]
+    merged_totals: tuple[CultivationMaterial, ...]
+    owned_inputs: tuple[CultivationMaterial, ...]
+    farming_stages: tuple[FarmingStage, ...]
+    stamina_item_ids: frozenset[str]
 
 
 class CultivationBatchPlannerService:
@@ -97,22 +116,46 @@ class CultivationBatchPlannerService:
     def __init__(self, single_service: CultivationPlannerService) -> None:
         self._single = single_service
 
-    def calculate(self, request: CultivationBatchRequest) -> CultivationBatchPlan:
+    def prepare(self, request: CultivationBatchRequest) -> CultivationBatchPreparation:
+        """与正式计算共用材料公式；准备阶段不消费库存或求解体力。"""
+        _validate_request(request)
+        stages = self._single.load_farming_stages()
+        raw_plans = tuple((target, self._single.calculate(target.request))
+                          for target in request.ordered_targets)
+        return CultivationBatchPreparation(
+            request.account_id, request.generation, request.dataset_identity, request.ordered_targets,
+            raw_plans, _merge_materials(plan.totals for _target, plan in raw_plans),
+            _merge_materials(plan.owned_inputs or plan.totals for _target, plan in raw_plans),
+            stages, stamina_material_ids(stages),
+        )
+
+    def dataset_metadata(self) -> dict[str, object]:
+        return self._single.dataset_metadata()
+
+    def calculate(
+        self, request: CultivationBatchRequest, *, preparation: CultivationBatchPreparation | None = None,
+    ) -> CultivationBatchPlan:
         started = perf_counter()
         trace_cultivation(request.trace_id, "worker.begin", targets=len(request.ordered_targets))
         _validate_request(request)
+        metadata: tuple[tuple[str, object], ...] = ()
+        history_error = None
+        if request.history_envelope is not None:
+            try:
+                metadata = tuple(self.dataset_metadata().items())
+            except Exception:
+                history_error = "고정된 자료 식별 정보를 읽지 못했습니다. 다시 계산하세요."
         owned = normalize_owned_quantities(dict(request.owned_quantities))
-        stages = self._single.load_farming_stages()
+        prepared = preparation if preparation is not None else self.prepare(request)
+        if (prepared.account_id != request.account_id or prepared.generation != request.generation
+                or prepared.dataset_identity != request.dataset_identity
+                or prepared.ordered_targets != request.ordered_targets):
+            raise ValueError("육성 재료 준비 결과가 고정된 목표와 일치하지 않습니다")
+        stages = prepared.farming_stages
         trace_cultivation(request.trace_id, "worker.stages_loaded", stages=len(stages))
-        raw_plans_list = []
-        for index, target in enumerate(request.ordered_targets, start=1):
-            raw_plans_list.append((target, self._single.calculate(target.request)))
-            trace_cultivation(request.trace_id, "worker.target_planned", index=index)
-        raw_plans = tuple(raw_plans_list)
-        merged = _merge_materials(plan.totals for _target, plan in raw_plans)
-        input_catalog = _merge_materials(
-            plan.owned_inputs or plan.totals for _target, plan in raw_plans
-        )
+        raw_plans = prepared.target_plans
+        merged = prepared.merged_totals
+        input_catalog = prepared.owned_inputs
         available = dict(owned)
         target_plans: list[CultivationTargetPlan] = []
         ledger: list[CultivationMaterialSource] = []
@@ -184,6 +227,10 @@ class CultivationBatchPlannerService:
             stamina_item_ids=stamina_material_ids(stages),
             owned_inputs=input_catalog,
             trace_id=request.trace_id,
+            preparation=prepared,
+            history_envelope=request.history_envelope,
+            dataset_metadata=metadata,
+            history_error=history_error,
         )
 
 

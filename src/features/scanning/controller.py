@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QDialog, QMessageBox, QPushButton, QWidget
 
 from src.app.context import AppContext
+from src.domain.work_mode import WorkMode
 from src.features.allocation.runner import AllocationController
 from src.features.allocation.filter_settings_dialog import AllocationFilterSettingsDialog
 from src.integrations.global_hotkeys import GlobalHotkeyManager
@@ -77,7 +78,6 @@ class ScanningController(QObject):
     _on_scan_change = _on_scan_change
     _on_priority_changed = _on_priority_changed
     _open_scan_post_action_manager = _open_scan_post_action_manager
-    _do_exec = _do_exec
     _scan_lifecycle = _scan_lifecycle
     _is_scope_image = _is_scope_image
     _prepare_incremental_parse = _prepare_incremental_parse
@@ -114,6 +114,8 @@ class ScanningController(QObject):
         *,
         app_context: AppContext,
         dialog_parent: QWidget,
+        navigate: Callable[[str], None],
+        work_mode_provider: Callable[[], WorkMode],
         minimize_window: Callable[[], None],
         restore_window: Callable[[], None],
         activate_window: Callable[[], None],
@@ -130,6 +132,7 @@ class ScanningController(QObject):
         operation_generation: Callable[[], object] | None = None,
         operation_entry: Callable[[str, str], bool] | None = None,
         operation_unavailable: Callable[[str, str, str], None] | None = None,
+        prepare_calculation: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         super().__init__(dialog_parent)
         self.app_context = app_context
@@ -137,7 +140,10 @@ class ScanningController(QObject):
         self.operation_unavailable = operation_unavailable
         self.operation_guard = operation_guard
         self.operation_generation = operation_generation
+        self._prepare_calculation = prepare_calculation
         self.dialog_parent = dialog_parent
+        self.navigate = navigate
+        self.work_mode_provider = work_mode_provider
         self._minimize_window = minimize_window
         self._restore_window = restore_window
         self._activate_window = activate_window
@@ -207,6 +213,14 @@ class ScanningController(QObject):
 
     def is_running(self) -> bool:
         return _scanning_is_running(self) or self._allocation_controller.is_running()
+
+    def _do_exec(self):
+        if self.is_running():
+            return
+        if self._prepare_calculation is None:
+            _do_exec(self)
+        else:
+            self._prepare_calculation(lambda: _do_exec(self))
 
     def request_stop(self) -> None:
         """Revoke active input/parse work without waiting on the GUI thread."""

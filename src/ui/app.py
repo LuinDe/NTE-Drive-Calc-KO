@@ -108,10 +108,8 @@ from src.ui.work_mode_composition import (
 from src.ui.main_window_mixins import FeatureMainWindowMixin
 from src.ui.equipment_presentation import EquipmentPresentation
 from src.features.blueprints.page import BlueprintPage
-from src.features.toolbox.page import ToolboxDependencies, ToolboxPage
-from src.features.toolbox.toolbox_navigation import cultivation_context_identity
-from src.services.cultivation_planner_service import CultivationPlannerService
-from src.services.cultivation_owned_material_import import CultivationOwnedMaterialImportService
+from src.features.toolbox.page import ToolboxPage
+from src.ui.toolbox_composition import build_toolbox_dependencies
 from src.features.static_catalog.controller import StaticCatalogController
 from src.features.static_catalog.dependencies import (
     build_static_catalog_domain_pages,
@@ -121,7 +119,6 @@ from src.features.static_catalog.page import StaticCatalogPage
 from src.services.static_catalog_service import StaticCatalogService
 from src.services.warehouse_inventory_service import WarehouseInventoryService
 from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
-from src.services.rewind_shape_recommendation_service import RewindShapeRecommendationService
 from src.features.battle_report.dependencies import build_battle_report_controller
 from src.features.identification.controller import IdentificationController
 from src.features.onboarding.guide import OnboardingGuide
@@ -240,6 +237,12 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         self._account_context_unsubscribe = self.app_context.subscribe_account_changed(
             self._on_app_context_account_changed
         )
+        from src.ui.controllers.configuration_controller import register_page_configuration_lifecycle
+        self._unregister_page_tasks = register_page_configuration_lifecycle(
+            self.app_context, lambda: (getattr(self, "_basic_weight_controller", None),
+                                      getattr(self, "_official_role_controller", None),
+                                      getattr(self, "allocation_catalog_controller", None)),
+        )
         self._inventory_sync_lifecycle = CallbackAccountLifecycle(
             is_running=lambda: bool(self._inventory_sync_service and self._inventory_sync_service.is_running),
             stop=self._stop_inventory_sync,
@@ -290,6 +293,9 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             dialog_parent=self,
         )
         self.scanning_controller = ScanningController(
+            prepare_calculation=self.prepare_calculation,
+            navigate=self._go,
+            work_mode_provider=lambda: self.work_mode_service.settings.mode,
             operation_entry=self.operation_entry,
             operation_unavailable=self.operation_unavailable,
             operation_guard=self.operation_guard,
@@ -340,31 +346,13 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             navigate=self._go,
         )
         self.toolbox_page = ToolboxPage(
-            dependencies=ToolboxDependencies(
+            dependencies=build_toolbox_dependencies(
+                self.app_context,
                 operation_entry=self.operation_entry,
                 operation_unavailable=self.operation_unavailable,
                 operation_guard=self.operation_guard,
                 operation_generation=self.operation_generation,
-                rewind_service_factory=lambda: RewindShapeRecommendationService(
-                    user_database_path=self.app_context.account.user_database_path,
-                    static_database_path=self.app_context.paths.equipment_allocation_database_path,
-                    asset_root=self.app_context.paths.equipment_allocation_asset_root,
-                ),
-                cultivation_service_factory=lambda: CultivationPlannerService(
-                    user_database_path=self.app_context.account.user_database_path,
-                    static_database_path=self.app_context.paths.cultivation_database_path,
-                ),
-                cultivation_material_importer=lambda: CultivationOwnedMaterialImportService(
-                    user_database_path=self.app_context.account.user_database_path,
-                    static_database_path=self.app_context.paths.cultivation_database_path,
-                    account_id=self.app_context.account.active_account_id,
-                ).load_latest(),
-                cultivation_context_identity=lambda: cultivation_context_identity(
-                    self.app_context.account.active_account_id,
-                    self.app_context.generation,
-                    self.app_context.paths.cultivation_database_path,
-                ),
-                cultivation_asset_root=lambda: self.app_context.paths.cultivation_asset_root,
+                material_importer=self._import_cultivation_materials,
                 navigate_static_catalog=lambda: self._go("static_catalog"),
             ),
             dialog_parent=self,
@@ -438,6 +426,10 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             self._qt_log_sink_id = None
             logger.debug(f"화면 로그 출력 등록 실패, 파일 로그에만 기록합니다: {exc}")
         self._build_ui()
+        from src.ui.controllers.dashboard_controller import initialize_dashboard
+        initialize_dashboard(self)
+        from src.app.page_tasks import start_ui_latency_monitor
+        self._ui_latency_timer = start_ui_latency_monitor(self, lambda: self._nav_key_for_index(self.stack.currentIndex()))
         if self._ui_preferences["log_enabled"]:
             self._toggle_log(True)
         self._load_data()
@@ -446,7 +438,6 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             self, "_workshop_weight_refresh_thread", start_workshop_weight_template_refresh(
                 self.app_context.paths.workshop_weight_template_file,
                 self.app_context.paths.equipment_allocation_database_path)))
-        self._refresh_home()
         self.auto_sync_controller.start()
         self.work_mode_controller.start()
         self._on_log("시스템 준비 완료")
@@ -532,17 +523,28 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         super().mouseReleaseEvent(e)
 
     def closeEvent(self, e):
-        if getattr(self, "_config_dirty", False) and not self._confirm_leave_config_page():
+        from src.ui.controllers.configuration_controller import defer_page_transition
+        if defer_page_transition(self, self.close):
             e.ignore()
             return
-        if getattr(self, "_my_role_dirty", False) and not self._confirm_leave_my_role_page():
+        from src.app.page_tasks import close_page_tasks
+        self._ui_latency_timer.stop()
+        self.dashboard_controller.close()
+        for owner in (getattr(self, "_basic_weight_controller", None), getattr(self, "_official_role_controller", None),
+                      getattr(self, "allocation_catalog_controller", None)):
+            if owner is not None:
+                owner.close()
+        if close_page_tasks(self):
             e.ignore()
+            QTimer.singleShot(25, self.close)
             return
         if hasattr(self.scanning_controller, "role_selector"):
             try:
                 self.scanning_controller.role_selector.save_temporary_priority_config()
             except Exception as exc:
                 logger.warning(f"임시 우선순위 저장 실패: {exc}")
+        self.native_plugin_update_controller.stop()
+        self.performance_controller.close()
         self.character_profile_sync_controller.close()
         self.auto_sync_controller.close()
         self.work_mode_controller.close()
@@ -570,6 +572,7 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
         self._unregister_inventory_sync_lifecycle()
         self._unregister_character_profile_sync()
         self._account_context_unsubscribe()
+        self._unregister_page_tasks()
         log_event(
             "INFO",
             "application.stopping",
@@ -636,6 +639,9 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
                 self._refresh_account_combo()
 
     def _switch_account(self, account_id):
+        from src.ui.controllers.configuration_controller import defer_page_transition
+        if defer_page_transition(self, lambda: self._switch_account(account_id)):
+            return False
         operation = OperationContext.create(
             "account",
             account_id=self.app_context.account.active_account_id,
@@ -649,24 +655,6 @@ class MainWindow(MainWindowThemeMixin, MainWindowNavigationMixin, MainWindowData
             operation,
             target_account_id=account_id,
         )
-        if getattr(self, "_my_role_dirty", False) and not self._confirm_leave_my_role_page():
-            log_event(
-                "INFO",
-                "account.switch_cancelled",
-                "저장되지 않은 캐릭터 수정 때문에 계정 전환이 취소되었습니다",
-                operation,
-                reason="role_dirty",
-            )
-            return False
-        if getattr(self, "_config_dirty", False) and not self._confirm_leave_config_page():
-            log_event(
-                "INFO",
-                "account.switch_cancelled",
-                "저장되지 않은 기본 가중치 수정 때문에 계정 전환이 취소되었습니다",
-                operation,
-                reason="basic_weight_dirty",
-            )
-            return False
         if self._equipment_assembly_is_running():
             QMessageBox.information(
                 self,

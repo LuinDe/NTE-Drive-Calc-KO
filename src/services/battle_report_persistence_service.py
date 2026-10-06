@@ -255,6 +255,9 @@ class BattleReportPersistenceService:
             record = dao.load_finalized_battle_capture_record(battle_record_id)
             if not record or not (record.get("calc_capture_context") or {}).get("native_scope_builds"):
                 return False
+            if record["calc_capture_context"].get("equipment_storage"):
+                # New records already materialized their sole equipped snapshot.
+                return False
             selected, reason = select_scope_builds(record["calc_capture_context"], record)
             if reason or not selected["profiles"]:
                 return False

@@ -63,6 +63,8 @@ def allowed_capabilities(settings: WorkModeSettings) -> frozenset[Capability]:
 class CheckState(str, Enum):
     AVAILABLE = "available"
     WAITING = "waiting"
+    WAITING_LOGIN = "waiting_login"
+    WARNING = "warning"
     MISSING = "missing"
     FAULT = "fault"
     CLEANUP_PENDING = "cleanup_pending"
@@ -90,7 +92,7 @@ class WorkModeProbe:
     component_update_state: CheckState | None = None
     component_update_detail: str = ""
     game_path_valid: bool | None = None
-    game_running: bool = False
+    game_running: bool | None = False
     launcher_running: bool | None = None
     launcher_probe_error: str = ""
     logged_in: bool = False
@@ -110,6 +112,7 @@ class WorkModeProbe:
     cleanup_detail: str = ""
     cleanup_state: CheckState | None = None
     native_diagnostic: str = ""
+    native_diagnostic_state: CheckState | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,23 @@ class FeatureCheck:
 class WorkModeReport:
     mode: WorkMode
     features: tuple[FeatureCheck, ...]
+    # Only the shared startup preflight supplies this evidence; normal game
+    # waiting does not require all business snapshots to be available.
+    sync_enable_ready: bool = False
+
+    @property
+    def can_offer_sync_enable(self) -> bool:
+        return (
+            self.sync_enable_ready and self.mode != WorkMode.OFFLINE and bool(self.features)
+            and all(
+                item.state in {CheckState.AVAILABLE, CheckState.WAITING, CheckState.WAITING_LOGIN}
+                and item.feature != "cleanup"
+                and (item.feature != "component_update" or item.state == CheckState.AVAILABLE)
+                and dict(item.facts).get("inspection_incomplete") is not True
+                and dict(item.facts).get("files", True) is True
+                for item in self.features
+            )
+        )
 
     @property
     def ready(self) -> bool:

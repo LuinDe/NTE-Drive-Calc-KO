@@ -10,6 +10,7 @@ from typing import Any
 
 from src.domain.battle_report_transfer import battle_equipment_sha256
 from src.domain.battle_build_assumption import has_graduation_assumption
+from src.domain.battle_world_bonus_edit import world_bonus_edit_stats
 
 from .protocols import UserDataDaoMixinHost
 from .user_data_support import (
@@ -333,6 +334,11 @@ class BattleBuildEditDaoMixin(UserDataDaoMixinHost):
         value: Mapping[str, Any],
     ) -> dict[str, Any]:
         profile = dict(value)
+        if "battle_world_bonus" in profile:
+            try:
+                world_bonus_edit_stats(profile["battle_world_bonus"])
+            except ValueError as error:
+                raise UserDataValidationError(str(error)) from error
         character_id = _integer(profile.get("character_id"), "character_id", minimum=1)
         skills = profile.get("skill_levels") or {}
         if not isinstance(skills, Mapping):

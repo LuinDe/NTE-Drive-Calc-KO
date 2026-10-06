@@ -534,6 +534,11 @@ class BattleReportPage(QWidget):
     def end_analysis_details(self) -> None:
         self.analysis_progress.finish()
 
+    def show_marginal_error(self, message: str) -> None:
+        self.analysis_progress.show_error(
+            f"한계 이득 계산이 완료되지 않음: {message}. “재계산”을 클릭해 다시 시도하세요."
+        )
+
     def set_target_catalog(self, catalog: dict[str, object]) -> None:
         self.long_analysis_view.set_target_catalog(catalog)
 

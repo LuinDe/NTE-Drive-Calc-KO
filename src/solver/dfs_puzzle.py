@@ -2,7 +2,8 @@
 """Depth-first board solver for fitting drive shapes into role blueprints."""
 
 import copy
-from typing import List
+from concurrent.futures import CancelledError
+from typing import Callable, List
 from src.models.equipment import DriveShape
 
 class DFSPuzzleSolver:
@@ -38,12 +39,19 @@ class DFSPuzzleSolver:
                 if piece_matrix[r][c] == 1:
                     board[start_r + r][start_c + c] = 0
 
-    def solve(self, board: List[List[int]], pieces_to_place: List[str], current_results: List[List[List[str]]], max_solutions: int = 0):
+    def solve(
+        self, board: List[List[int]], pieces_to_place: List[str],
+        current_results: List[List[List[str]]], max_solutions: int = 0,
+        *, cancel_check: Callable[[], bool] | None = None,
+    ):
+        if cancel_check is not None and cancel_check():
+            raise CancelledError("분배 청사진 배치가 취소되었습니다")
         if max_solutions > 0 and len(current_results) >= max_solutions:
             return
 
         if not pieces_to_place:
-            current_results.append(copy.deepcopy(board))
+            if all(cell != 0 for row in board for cell in row):
+                current_results.append(copy.deepcopy(board))
             return
 
         b_rows, b_cols = len(board), len(board[0])
@@ -59,7 +67,7 @@ class DFSPuzzleSolver:
         if target_r == -1:
             return
 
-        unique_pieces = set(pieces_to_place)
+        unique_pieces = sorted(set(pieces_to_place))
 
         for piece_id in unique_pieces:
             piece_matrix = self.shapes_db[piece_id].matrix
@@ -80,7 +88,12 @@ class DFSPuzzleSolver:
                 self.place_piece(board, piece_matrix, start_r, start_c, piece_id)
                 next_pieces = list(pieces_to_place)
                 next_pieces.remove(piece_id)
-                self.solve(board, next_pieces, current_results, max_solutions)
-                self.remove_piece(board, piece_matrix, start_r, start_c)
+                try:
+                    self.solve(
+                        board, next_pieces, current_results, max_solutions,
+                        cancel_check=cancel_check,
+                    )
+                finally:
+                    self.remove_piece(board, piece_matrix, start_r, start_c)
                 if max_solutions > 0 and len(current_results) >= max_solutions:
                     return

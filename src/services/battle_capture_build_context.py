@@ -46,16 +46,33 @@ def native_build_unavailable_reason(snapshot: Mapping[str, Any], record: Mapping
 
 
 def native_equipment_projection(snapshot: Mapping[str, Any]) -> list[dict[str, Any]] | None:
-    projection = snapshot.get("inventory_projection")
-    if not isinstance(projection, Mapping):
-        return None
-    if (projection.get("projectionComplete") is not True or projection.get("collectionComplete") is not True
-            or projection.get("characterRefsComplete") is not True or projection.get("collectionScope") != "EQUIP"):
-        return None
-    raw_domain = (snapshot.get("domains") or {}).get("inventory") or {}
-    if any(projection.get(key) != raw_domain.get(key) for key in ("providerId", "domainKey", "revision")):
-        return None
-    rows = projection.get("items")
+    projection = snapshot.get("character_projection") or {}
+    equipped = projection.get("battleEquipment") or {}
+    if equipped.get("complete") is True:
+        if equipped.get("schemaVersion") != 1 or equipped.get("scope") != "character_equipped_only":
+            return None
+        raw_domain = (snapshot.get("domains") or {}).get("character") or {}
+        if any(projection.get(key) != raw_domain.get(key) for key in (
+                "providerId", "domainKey", "revision", "snapshotId", "generation")):
+            return None
+        selected = set((snapshot.get("selection") or {}).get("character_ids", []))
+        covered = {row.get("character_id") for row in equipped.get("characters", []) if isinstance(row, Mapping)}
+        if not selected.issubset(covered):
+            return None
+        rows = equipped.get("items")
+    else:
+        # Read-only compatibility for already saved reports; new battle capture
+        # never reads or requests an inventory snapshot.
+        projection = snapshot.get("inventory_projection")
+        if not isinstance(projection, Mapping):
+            return None
+        if (projection.get("projectionComplete") is not True or projection.get("collectionComplete") is not True
+                or projection.get("characterRefsComplete") is not True or projection.get("collectionScope") != "EQUIP"):
+            return None
+        raw_domain = (snapshot.get("domains") or {}).get("inventory") or {}
+        if any(projection.get(key) != raw_domain.get(key) for key in ("providerId", "domainKey", "revision")):
+            return None
+        rows = projection.get("items")
     if not isinstance(rows, list):
         return None
     result = []

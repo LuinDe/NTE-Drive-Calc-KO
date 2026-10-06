@@ -14,7 +14,7 @@ from src.ui.widgets import NoWheelComboBox
 MODE_LABELS = {"offline": "오프라인", "low": "저위험", "medium": "중위험", "developer": "개발"}
 MODE_DESCRIPTIONS = {
     "offline": "로컬 계산, 장비 세팅, 저장된 데이터 및 과거 전투 리포트 분석.",
-    "low": "위 기능 + 패킷 캡처 동기화/전투 리포트 + 마우스 또는 게임패드 스캔; 게임 구성 요소는 사용하지 않습니다.",
+    "low": "위 기능 + 기본 동기화/패킷 캡처 + 마우스 또는 게임패드 스캔; 게임 구성 요소는 사용하지 않습니다.",
     "medium": "위 기능 + 네이티브 동기화, 네이티브 전투 리포트, 고속 장착, 잠금/폐기 및 플러그인.",
     "developer": "패킷 캡처와 네이티브 이중 경로 비교, 개발자 전용입니다.",
 }
@@ -30,7 +30,7 @@ MODE_CONFIRMATIONS = {
     "low": {
         "warning_title": "이 모드에는 위험이 있습니다",
         "warning_detail": "패킷 캡처와 입력 시뮬레이션은 게임 보호 또는 호환성 문제를 유발할 수 있습니다.",
-        "available": "패킷 캡처 동기화, 패킷 캡처 전투 리포트, 마우스 또는 게임패드 스캔",
+        "available": "기본 동기화/패킷 캡처, 마우스 또는 게임패드 스캔",
         "unavailable": "캐릭터 상태 동기화, 네이티브 동기화, 네이티브 전투 리포트, 고속 장착, 플러그인",
         "after": "네이티브 연결을 중지합니다. 게임 종료 후 배포된 구성 요소를 정리합니다.",
         "note": "자동 동기화는 여전히 작업대 스위치로 제어됩니다. 확인하면 이 모드가 저장되며, 이후 버전 업데이트에서도 계속 사용됩니다.",
@@ -39,7 +39,7 @@ MODE_CONFIRMATIONS = {
         "warning_title": "이 모드에는 위험이 있습니다",
         "warning_detail": "게임 컴포넌트를 로드하고 게임 내 작업을 실행하므로, 게임 보호나 호환성 문제가 발생할 수 있습니다.",
         "available": "네이티브 동기화, 네이티브 전투 리포트, 고속 장착, 잠금/폐기, 플러그인",
-        "unavailable": "패킷 캡처 동기화, 패킷 캡처 전투 리포트, 이중 경로 전투 리포트 비교",
+        "unavailable": "기본 동기화/패킷 캡처, 이중 경로 전투 리포트 비교",
         "after": "동기화를 켜고 준비를 확인하면, 게임 종료 시 필요한 컴포넌트를 배포하거나 업데이트합니다.",
         "note": "모드 확인이 자동 동기화를 켜는 것은 아닙니다; 작업대를 처음 열면 먼저 환경 검사가 표시됩니다. 모드 선택은 저장됩니다.",
     },
@@ -52,9 +52,13 @@ MODE_CONFIRMATIONS = {
         "note": "모드 확인이 자동 동기화를 켜는 것은 아닙니다; 작업대를 처음 열면 먼저 환경 검사가 표시됩니다. 모드 선택은 저장됩니다.",
     },
 }
-STATE_LABELS = {"available": "사용 가능", "waiting": "정상 대기", "missing": "조건 부족",
-                "fault": "장애", "cleanup_pending": "정리 대기 중"}
+STATE_LABELS = {
+    "available": "사용 가능", "waiting": "정상 대기", "waiting_login": "로그인 대기",
+    "warning": "경고", "missing": "조건 부족", "fault": "장애",
+    "cleanup_pending": "정리 대기 중",
+}
 ISSUE_STATES = frozenset({"fault", "missing", "cleanup_pending"})
+WARNING_STATES = frozenset({"waiting_login", "warning"})
 
 
 def _check_state_label(item) -> str:
@@ -105,10 +109,11 @@ def report_summary(report) -> str:
 
 def _report_groups(report):
     """Keep shared causes together, without discarding any per-feature diagnostic fact."""
-    sections = ([], [], [])
+    sections = ([], [], [], [])
     for item in report.features:
         section = 0 if item.state.value in ISSUE_STATES else (
-            1 if item.state.value == "waiting" else 2
+            1 if item.state.value in WARNING_STATES else
+            2 if item.state.value == "waiting" else 3
         )
         key = (item.state.value, _check_state_label(item), item.detail)
         group = next((group for group in sections[section] if group[0] == key), None)
@@ -158,9 +163,10 @@ def prompt_offline_sync_mode(parent) -> bool:
 class ModeReportDialog(QDialog):
     """Keep the explicit check visible from queued work through its final report."""
 
-    def __init__(self, parent, controller):
+    def __init__(self, parent, controller, *, sync_action_provider=None):
         super().__init__(parent)
         self._controller = controller
+        self._sync_action_provider = sync_action_provider
         self._settings_target = "deployment"
         self._preview = False
         self.setWindowModality(Qt.WindowModal)
@@ -183,6 +189,14 @@ class ModeReportDialog(QDialog):
         self.metadata.setObjectName("modeReportMetadata")
         self.metadata.setStyleSheet(f"color:{theme_color('#8b949e')};font-size:11px")
         layout.addWidget(self.metadata)
+        self.status_hint = QLabel(
+            "빨간색은 처리가 필요한 항목, 노란색은 로그인 대기 또는 경고, 파란색은 정상 대기 또는 점검 대기입니다. 자세한 내용은 각 항목의 설명을 확인하세요.", self,
+        )
+        self.status_hint.setObjectName("modeReportStatusHint")
+        self.status_hint.setWordWrap(True)
+        self.status_hint.setStyleSheet(f"color:{theme_color('#8b949e')};font-size:12px")
+        self.status_hint.hide()
+        layout.addWidget(self.status_hint)
         self.label = QLabel()
         self.label.setTextFormat(Qt.PlainText)
         self.label.setWordWrap(True)
@@ -271,9 +285,8 @@ class ModeReportDialog(QDialog):
             row = QFrame(self.results)
             row.setObjectName("modeReportFeatureRow")
             color = theme_color(
-                "#f85149" if state == "fault" else
-                "#d29922" if state in ISSUE_STATES else
-                "#58a6ff"
+                "#f85149" if state in ISSUE_STATES else
+                "#d29922" if state in WARNING_STATES else "#58a6ff"
             )
             row.setStyleSheet(
                 f"QFrame#modeReportFeatureRow{{background:{theme_color('#161b22')};"
@@ -296,17 +309,27 @@ class ModeReportDialog(QDialog):
 
     def _render_report(self, report):
         self._clear_results()
-        issues, waiting, available = _report_groups(report)
+        issues, warnings, waiting, available = _report_groups(report)
         problem_count = sum(len(labels) for _key, labels in issues)
+        warning_count = sum(len(labels) for _key, labels in warnings)
+        self.status_hint.setVisible(bool(issues or warnings or waiting))
         waiting_count = sum(len(labels) for _key, labels in waiting)
         ready_count = sum(len(labels) for _key, labels in available)
         if problem_count:
-            self.overview.setText(f"처리 필요 {problem_count}개 · 대기 {waiting_count}개 · 준비 완료 {ready_count}개")
+            self.overview.setText(
+                f"처리 필요 {problem_count}개 · 노란색 알림 {warning_count}개 · "
+                f"대기 {waiting_count}개 · 준비 완료 {ready_count}개"
+            )
+        elif warning_count:
+            self.overview.setText(
+                f"노란색 알림 {warning_count}개 · 대기 {waiting_count}개 · 준비 완료 {ready_count}개"
+            )
         elif waiting_count:
             self.overview.setText(f"대기 {waiting_count}개 · 준비 완료 {ready_count}개")
         else:
             self.overview.setText(f"전체 {ready_count}개 항목 준비 완료")
         self._add_result_section("처리 필요", issues, "#f85149")
+        self._add_result_section("로그인 대기 또는 경고", warnings, "#d29922")
         self._add_result_section("대기 또는 점검 대기", waiting, "#58a6ff")
         if available:
             heading = QLabel(f"준비 완료 ({ready_count}개)", self.results)
@@ -330,7 +353,7 @@ class ModeReportDialog(QDialog):
         if self._preview:
             self._controller.check(show=True, preview=True)
         else:
-            self._controller.check(show=True)
+            self._controller.check(show=True, retry_deployment=True)
 
     def _clear_actions(self):
         while self.actions.count():
@@ -345,6 +368,7 @@ class ModeReportDialog(QDialog):
         self._clear_results()
         self.overview.setText("동기화 조건을 확인하는 중…" if preview else "환경을 검사하는 중…")
         self.metadata.clear()
+        self.status_hint.hide()
         self.diagnostic_toggle.setChecked(False)
         self.diagnostic_toggle.hide()
         self.label.clear()
@@ -404,8 +428,14 @@ class ModeReportDialog(QDialog):
                 self._controller.detect_path()
             self._add_action("경로 다시 검사", detect, close=True)
             self.settings_button.hide()
+        if (not self._preview and self._sync_action_provider is not None
+                and report.can_offer_sync_enable):
+            action = self._sync_action_provider(report)
+            if action is not None:
+                self._add_action("자동 동기화 켜기", action)
 
     def set_error(self, detail):
+        self.status_hint.hide()
         self.progress.hide()
         self._clear_actions()
         self._set_primary_action("환경 설정으로 이동", self._open_environment_settings)
@@ -444,6 +474,7 @@ class ModeReportDialog(QDialog):
             self.settings_button.hide()
 
     def set_activation_result(self, ready, detail):
+        self.status_hint.hide()
         self.progress.hide()
         self._clear_actions()
         self.retry_button.setEnabled(True)
@@ -553,9 +584,9 @@ def build_work_mode_card(window):
     combo.setCurrentIndex(combo.findData(service.settings.mode.value))
     combo.setFixedWidth(150)
     controls.addWidget(combo)
-    check = QPushButton("검사 상세")
+    check = QPushButton("검사·처리")
     check.setFixedWidth(96)
-    check.clicked.connect(lambda: controller.check(show=True))
+    check.clicked.connect(lambda: controller.check(show=True, retry_deployment=True))
     controls.addWidget(check)
     controls.addStretch()
     card.layout().addLayout(controls)
@@ -580,7 +611,7 @@ def build_work_mode_card(window):
     card.layout().addLayout(descriptions)
 
     def refresh_mode_emphasis(_index=None):
-        selected = service.settings.mode.value
+        selected = service.settings.mode.value if combo.currentIndex() >= 0 else None
         for key, label in mode_labels.items():
             label.setProperty("confirmedMode", key == selected)
             color = theme_color("#58a6ff" if key == selected else "#f0f6fc")

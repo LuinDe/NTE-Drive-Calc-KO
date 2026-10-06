@@ -23,7 +23,7 @@ class DashboardService:
         self.static_database_path = static_database_path
 
     def load(self) -> dict[str, Any]:
-        with UserDataDao(self.user_database_path) as user_dao:
+        with UserDataDao(self.user_database_path) as user_dao, user_dao.read_consistent_state():
             user_summary = user_dao.summary()
             inventory = user_summary["inventory"]
             snapshot_id = inventory["snapshot_id"] if inventory else None

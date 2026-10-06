@@ -5,26 +5,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QStringListModel, Qt, QTimer
 from PySide6.QtWidgets import QComboBox, QCompleter, QDoubleSpinBox, QSpinBox
-
-
-def match_pinyin(name: str, filt: str) -> bool:
-    """Case-insensitive Chinese/name/pinyin matcher used by searchable controls."""
-
-    if not filt:
-        return True
-    keyword = filt.lower()
-    text = str(name or "").lower()
-    if keyword in text:
-        return True
-    try:
-        from pypinyin import Style, lazy_pinyin
-
-        parts = lazy_pinyin(str(name), style=Style.NORMAL)
-        if keyword in "".join(parts).lower():
-            return True
-        return keyword in "".join(part[0] for part in parts if part).lower()
-    except ImportError:
-        return False
+from src.domain.name_search import match_pinyin as match_pinyin
 
 
 class NoWheelComboBox(QComboBox):

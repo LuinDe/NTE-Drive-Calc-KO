@@ -1,4 +1,4 @@
-# 渲染固定轴属性与 Buff 的分层量化结果，未知值统一显示为破折号。
+# 渲染固定轴属性与 Buff 结果；有预估时展示数值，依据保留在提示中。
 """Table renderers for fixed-axis marginal results."""
 
 from __future__ import annotations
@@ -59,7 +59,10 @@ def _gain_value(
     status: QuantificationStatus,
     complete: float | None,
     partial: float | None,
+    estimated: float | None = None,
 ) -> str:
+    if estimated is not None:
+        return _percent(estimated)
     if status == "complete":
         return "—" if complete is None else _percent(complete)
     if status == "partial":
@@ -146,11 +149,13 @@ def render_attribute_results(
                 role_status,
                 result.full_role_gain_percent,
                 result.quantified_role_gain_percent,
+                getattr(result, "estimated_role_gain_percent", None),
             ),
             _gain_value(
                 team_status,
                 result.full_team_gain_percent,
                 result.quantified_team_gain_percent,
+                getattr(result, "estimated_team_gain_percent", None),
             ),
             f"{getattr(result, 'related_role_share_percent', 0.0):.1f}%",
             f"{getattr(result, 'role_share_percent', result.damage_share_percent):.1f}%",

@@ -11,6 +11,8 @@ STAGES = (
     "character_init", "character_validate", "forks", "equipment_index", "character_rows",
     "character_base", "skills", "skill_query", "awakening", "awakening_definitions",
     "slots", "other_fields", "related_equipment", "row_finalize", "verify",
+    "domain_roots", "domain_identity", "domain_clone",
+    "clock_roots_before", "clock_function", "clock_queries", "clock_roots_after",
 )
 COUNTERS = ("calls", "total_us", "max_us", "over_8333_us", "over_20000_us")
 SAMPLE_NUMBERS = ("sequence", "started_monotonic_us", "total_us", "job", "step")

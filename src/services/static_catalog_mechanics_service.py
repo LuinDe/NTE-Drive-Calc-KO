@@ -432,7 +432,7 @@ class StaticCatalogMechanicsService:
             return "states"
         if "unbal" in text or "倾陷" in text or "抗性" in text:
             return "states"
-        if any(token in text for token in ("attachment", "소환", "치료", "보호막", "시간 정지")):
+        if any(token in text for token in ("attachment", "召唤", "治疗", "护盾", "时停", "소환", "치료", "보호막", "시간 정지")):
             return "settlement"
         return "multipliers"
 
@@ -489,9 +489,9 @@ class StaticCatalogMechanicsService:
 
     @staticmethod
     def _field_tone(label: str) -> str:
-        if any(token in label for token in ("持续", "주기", "중첩", "대상", "발동")):
+        if any(token in label for token in ("持续", "지속", "주기", "중첩", "대상", "발동")):
             return "accent"
-        if "不可用" in label or "状态" in label:
+        if "不可用" in label or "状态" in label or "상태" in label:
             return "warning"
         return "neutral"
 

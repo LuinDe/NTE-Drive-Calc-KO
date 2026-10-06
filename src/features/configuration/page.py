@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from time import perf_counter
+
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -23,6 +26,14 @@ from src.app.theme import themed_style
 from src.features.configuration.controller import BasicWeightController
 from src.features.configuration.dependencies import BasicWeightDependencies
 from src.features.configuration.shape_display import official_shape_display_rows
+from .commit_actions import (
+    create_custom_role, delete_custom_role, save_config_form,
+    reset_config_form as reset_config_form,
+    reset_current_config_weights as reset_current_config_weights,
+    reset_all_config_weights as reset_all_config_weights,
+)
+from src.utils.logger import logger
+from src.utils.perf import log_perf
 
 
 _ACCOUNT_WEIGHT_CONFIG = "account_weights"
@@ -33,15 +44,22 @@ def _basic_weight_controller(window) -> BasicWeightController:
     controller = getattr(window, "_basic_weight_controller", None)
     if (
         not isinstance(controller, BasicWeightController)
+        or controller._closed
         or controller.dependencies != dependencies
     ):
-        controller = BasicWeightController(dependencies)
+        if isinstance(controller, BasicWeightController):
+            controller.close()
+        controller = BasicWeightController(dependencies, window if isinstance(window, QWidget) else None)
+        notify = getattr(window, "on_configuration_changed", None)
+        if callable(notify):
+            controller.changed.connect(lambda: notify() if controller.dependencies == BasicWeightDependencies.from_app_context(window.app_context) else None)
         window._basic_weight_controller = controller
     return controller
 
 
 def build_config_page(window):
     page = QWidget()
+    window.config_page_view = page
     layout = QVBoxLayout(page)
     layout.setContentsMargins(20, 16, 20, 16)
     layout.setSpacing(10)
@@ -93,6 +111,9 @@ def build_config_page(window):
     save_btn.clicked.connect(window._save_config_form)
     top_row.addWidget(save_btn)
     layout.addLayout(top_row)
+    window.config_mutation_buttons = (reset_current_btn, reset_all_btn, new_btn, save_btn)
+    window.config_load_status = QLabel()
+    layout.addWidget(window.config_load_status)
 
     window.config_form_area = QScrollArea()
     window.config_form_area.setWidgetResizable(True)
@@ -108,7 +129,13 @@ def refresh_config_forms(window, config_dir):
         switch_config_form(window, _ACCOUNT_WEIGHT_CONFIG, config_dir)
 
 
-def confirm_pending_config_changes(window, config_dir):
+def deactivate_config_page(window):
+    controller = getattr(window, "_basic_weight_controller", None)
+    if isinstance(controller, BasicWeightController):
+        controller.cancel_reads()
+
+
+def confirm_pending_config_changes(window, config_dir, *, completion=None):
     if not getattr(window, "_config_dirty", False):
         return True
     current_name = getattr(window, "_current_config_name", None)
@@ -132,7 +159,8 @@ def confirm_pending_config_changes(window, config_dir):
             "save",
             len(getattr(window, "_config_dirty_character_ids", set())),
         )
-        save_config_form(window, config_dir, None)
+        save_config_form(window, config_dir, None, completion=completion, show_message=False)
+        return False  # Only the commit acknowledgement may continue navigation.
     else:
         _basic_weight_controller(window).log_dirty_exit(
             "discard",
@@ -140,6 +168,9 @@ def confirm_pending_config_changes(window, config_dir):
         )
         window._config_dirty = False
         window._config_form_data = None
+        window._config_loaded_model = None
+        for field in ("character", "shape_bonus", "board", "target_suit"):
+            getattr(window, f"_config_dirty_{field}_ids", set()).clear()
     return True
 
 
@@ -147,52 +178,56 @@ def switch_config_form(window, name=_ACCOUNT_WEIGHT_CONFIG, config_dir=None, use
     """显示当前账号的 SQLite 词条权重；不再提供 JSON 配置入口。"""
     if name != _ACCOUNT_WEIGHT_CONFIG:
         return
-    current_name = getattr(window, "_current_config_name", None)
-    if current_name and current_name != name and not confirm_pending_config_changes(window, config_dir):
+    if getattr(window, "_config_dirty", False):
+        return  # A refresh never overwrites an unsaved draft.
+    controller = _basic_weight_controller(window)
+    if controller.is_writing():
         return
-    if current_name and current_name != name and getattr(window, "_config_dirty", False):
-        ret = QMessageBox.question(
-            window,
-            "저장되지 않은 설정",
-            f"{current_name}에 저장되지 않은 수정이 있습니다. 먼저 저장할까요?",
-            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-            QMessageBox.Save,
-        )
-        if ret == QMessageBox.Cancel:
-            return
-        if ret == QMessageBox.Save:
-            save_config_form(window, config_dir, None)
-        else:
-            window._config_dirty = False
-    while window.config_form_layout.count():
-        item = window.config_form_layout.takeAt(0)
-        if item.widget():
-            item.widget().deleteLater()
-
-    if hasattr(window, "config_form_area"):
-        window.config_form_area.setUpdatesEnabled(False)
-    if use_draft and name == current_name and getattr(window, "_config_dirty", False) and hasattr(window, "_config_form_data"):
-        data = window._config_form_data
-    else:
-        loaded = _basic_weight_controller(window).load_form_data()
-        data = loaded["roles"]
-        window._config_weight_property_labels = loaded["property_labels"]
-        window._config_weight_sub_choices = loaded["sub_choices"]
-        window._config_weight_main_choices = loaded["main_choices"]
-        window._config_shape_bonus_choices = loaded["shape_bonus_choices"]
-        window._config_shape_label_choices = loaded["shape_label_choices"]
-        window._config_suit_choices = loaded["suit_choices"]
-        window._config_dirty_character_ids = set()
-        window._config_dirty_shape_bonus_ids = set()
-        window._config_dirty_board_ids = set()
-        window._config_dirty_target_suit_ids = set()
+    window.config_load_status.setText("현재 계정 가중치를 읽는 중…")
+    window.config_form_area.setEnabled(False)
+    for button in window.config_mutation_buttons:
+        button.setEnabled(False)
     window._current_config_name = name
-    window._config_form_data = data
-    if name != current_name:
-        window._config_dirty = False
-    render_roles_form(window, data, active_role=active_role)
-    if hasattr(window, "config_form_area"):
-        window.config_form_area.setUpdatesEnabled(True)
+
+    def current():
+        return (controller is getattr(window, "_basic_weight_controller", None)
+                and controller.dependencies == BasicWeightDependencies.from_app_context(window.app_context))
+
+    def apply(loaded):
+        if not current() or getattr(window, "_config_dirty", False):
+            return
+        started = perf_counter()
+        try:
+            if (controller.dependencies != getattr(window, "_config_model_dependencies", None)
+                    or loaded != getattr(window, "_config_loaded_model", None)):
+                while window.config_form_layout.count():
+                    item = window.config_form_layout.takeAt(0)
+                    if item.widget():
+                        item.widget().deleteLater()
+                window._config_loaded_model = deepcopy(loaded)
+                window._config_model_dependencies = controller.dependencies
+                window._config_form_data = loaded["roles"]
+                for field in ("property_labels", "sub_choices", "main_choices", "shape_bonus_choices", "shape_label_choices", "suit_choices"):
+                    target = "_config_weight_" + field if field in {"property_labels", "sub_choices", "main_choices"} else "_config_" + field
+                    setattr(window, target, loaded[field])
+                for field in ("character", "shape_bonus", "board", "target_suit"):
+                    setattr(window, f"_config_dirty_{field}_ids", set())
+                render_roles_form(window, loaded["roles"], active_role=active_role or getattr(window, "_config_active_role", None))
+            window.config_load_status.clear()
+            window.config_page_view.setEnabled(True)
+            window.config_form_area.setEnabled(True)
+            for button in window.config_mutation_buttons:
+                button.setEnabled(True)
+            log_perf(logger, "basic_weight.form_apply", elapsed_ms=(perf_counter() - started) * 1000)
+        except Exception as exc:
+            failed(str(exc))
+
+    def failed(error):
+        if current():
+            window.config_load_status.setText(f"가중치 읽기 실패: {error}. 이 페이지에 다시 들어오면 재시도할 수 있습니다.")
+            window._config_loaded_model = None
+
+    controller.request_form_data(apply, failed)
 
 
 def _field(label, widget, layout):
@@ -455,6 +490,7 @@ def _populate_config_role_tab(window, data, role_name, tab_scroll, rebuild_all_t
 def render_roles_form(window, data, active_role=None):
     all_names = list(data.keys())
     roles_tabs = QTabWidget()
+    window.config_roles_tabs = roles_tabs
     tab_indices = {}
 
     def filter_tabs(filter_text=""):
@@ -558,54 +594,6 @@ def save_extra_shape_label(window, rn, value, data):
     window._config_dirty = True
 
 
-def create_custom_role(window):
-    name, accepted = QInputDialog.getText(
-        window,
-        "새 캐릭터",
-        "캐릭터 이름 (게임 내 이름으로도 사용):",
-    )
-    if not accepted:
-        return
-    try:
-        role = _basic_weight_controller(window).create_custom_role(name)
-    except Exception as exc:
-        QMessageBox.warning(window, "새 캐릭터 생성 실패", str(exc))
-        return
-    window._config_dirty = False
-    window._config_form_data = None
-    reload_data = getattr(window, "_load_data", None)
-    if callable(reload_data):
-        reload_data(reload_priority=False)
-    switch_config_form(
-        window,
-        _ACCOUNT_WEIGHT_CONFIG,
-        active_role=str(role["name_zh"]),
-    )
-
-
-def delete_custom_role(window, role_name, role_data, rebuild_all_tabs):
-    if QMessageBox.question(
-        window,
-        "캐릭터 삭제",
-        f"[{role_name}]과(와) 해당 계산 선호도·장비 세팅 슬롯을 삭제할까요?",
-        QMessageBox.Yes | QMessageBox.Cancel,
-        QMessageBox.Cancel,
-    ) != QMessageBox.Yes:
-        return
-    character_id = int(role_data["character_id"])
-    try:
-        _basic_weight_controller(window).delete_custom_role(character_id)
-    except Exception as exc:
-        QMessageBox.warning(window, "캐릭터 삭제 실패", str(exc))
-        return
-    window._config_dirty = False
-    window._config_dirty_character_ids.discard(character_id)
-    window._config_dirty_board_ids.discard(character_id)
-    data = getattr(window, "_config_form_data", {}) or {}
-    data.pop(role_name, None)
-    rebuild_all_tabs()
-
-
 def save_single_extra_shape_bonus(window, rn, property_id, value, data):
     """Stage the sole account-level extra-shape bonus until Save is clicked."""
     if rn not in data:
@@ -641,143 +629,6 @@ def del_weight(window, rn, key, data, cb, config_dir, weight_field="weights"):
             window._config_dirty_character_ids.add(int(data[rn]["character_id"]))
         save_config_data(window, data, config_dir)
         cb()
-
-
-def save_config_form(window, config_dir, json_edit_dialog_cls):
-    name = getattr(window, "_current_config_name", None)
-    if not name:
-        return
-    if name != _ACCOUNT_WEIGHT_CONFIG:
-        return
-    data = getattr(window, "_config_form_data", {}) or {}
-    dirty_ids = set(getattr(window, "_config_dirty_character_ids", set()))
-    shape_bonus_dirty_ids = set(
-        getattr(window, "_config_dirty_shape_bonus_ids", set())
-    )
-    board_dirty_ids = set(getattr(window, "_config_dirty_board_ids", set()))
-    target_suit_dirty_ids = set(
-        getattr(window, "_config_dirty_target_suit_ids", set())
-    )
-    try:
-        _basic_weight_controller(window).save_changes(
-            data,
-            dirty_ids,
-            shape_bonus_dirty_ids,
-            board_dirty_ids,
-            target_suit_dirty_ids,
-        )
-    except Exception as exc:
-        QMessageBox.warning(window, "저장 실패", str(exc))
-        return
-    window._config_dirty = False
-    for field_name in (
-        "_config_dirty_character_ids",
-        "_config_dirty_shape_bonus_ids",
-        "_config_dirty_board_ids",
-        "_config_dirty_target_suit_ids",
-    ):
-        dirty_values = getattr(window, field_name, None)
-        if dirty_values is not None:
-            dirty_values.clear()
-    reload_data = getattr(window, "_load_data", None)
-    if callable(reload_data):
-        reload_data()
-    QMessageBox.information(
-        window,
-        "저장",
-        "캐릭터 가중치 설정이 저장되었습니다.",
-    )
-
-
-def _confirm_weight_reset(window, message: str) -> bool:
-    if getattr(window, "_current_config_name", None) != _ACCOUNT_WEIGHT_CONFIG:
-        return False
-    return QMessageBox.question(
-        window, "가중치 초기화 확인", message,
-        QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
-    ) == QMessageBox.Yes
-
-
-def _reload_after_weight_reset(window, config_dir, active_role: str | None) -> None:
-    # Reset applies only to persisted account weights.  A full form reload also
-    # deliberately discards any draft, making the confirmation above explicit.
-    window._config_dirty = False
-    window._config_form_data = None
-    window._config_dirty_character_ids = set()
-    window._config_dirty_shape_bonus_ids = set()
-    window._config_dirty_target_suit_ids = set()
-    switch_config_form(window, _ACCOUNT_WEIGHT_CONFIG, config_dir, active_role=active_role)
-    reload_data = getattr(window, "_load_data", None)
-    if callable(reload_data):
-        reload_data()
-
-
-def reset_current_config_weights(window, config_dir):
-    role_name = str(getattr(window, "_config_active_role", "") or "")
-    data = getattr(window, "_config_form_data", {}) or {}
-    role_data = data.get(role_name) or {}
-    if not role_name or not role_data:
-        QMessageBox.information(window, "현재 초기화", "먼저 캐릭터를 선택하세요.")
-        return
-    if role_data.get("is_custom"):
-        QMessageBox.information(window, "현재 초기화", "사용자 정의 캐릭터에는 배포 기본 가중치가 없어 현재 사용자 값을 유지합니다.")
-        return
-    if not _confirm_weight_reset(
-        window,
-        f"현재 계정에서 [{role_name}]의 사용자 정의 카트리지 메인 스탯·드라이브 서브 스탯 가중치를 지우고,"
-        "현재 이환 공방 기본값으로 복원합니다.\n\n"
-        "추가 형태 태그와 추가 형태 보너스는 바뀌지 않으며, 저장되지 않은 편집은 버려집니다.",
-    ):
-        return
-    try:
-        _basic_weight_controller(window).reset_weights(
-            (int(role_data["character_id"]),)
-        )
-    except Exception as exc:
-        QMessageBox.warning(window, "초기화 실패", str(exc))
-        return
-    _reload_after_weight_reset(window, config_dir, role_name)
-    QMessageBox.information(
-        window, "현재 초기화", f"[{role_name}]을(를) 기본 가중치로 복원했습니다. 이후 새 버전에 따라 갱신됩니다.",
-    )
-
-
-def reset_all_config_weights(window, config_dir):
-    data = getattr(window, "_config_form_data", {}) or {}
-    character_ids = [
-        int(role_data["character_id"])
-        for role_data in data.values()
-        if (
-            isinstance(role_data, dict)
-            and role_data.get("character_id") is not None
-            and not role_data.get("is_custom")
-        )
-    ]
-    if not character_ids:
-        return
-    if not _confirm_weight_reset(
-        window,
-        f"현재 계정의 캐릭터 {len(character_ids)}명 전체의 사용자 정의 카트리지 메인 스탯·드라이브 서브 스탯 가중치를 지우고,"
-        "현재 이환 공방 기본값으로 복원합니다.\n\n"
-        "이 작업은 되돌릴 수 없습니다. 추가 형태 태그와 추가 형태 보너스는 바뀌지 않으며, 저장되지 않은 편집은 버려집니다.",
-    ):
-        return
-    try:
-        restored = _basic_weight_controller(window).reset_weights(character_ids)
-    except Exception as exc:
-        QMessageBox.warning(window, "초기화 실패", str(exc))
-        return
-    active_role = str(getattr(window, "_config_active_role", "") or "")
-    _reload_after_weight_reset(window, config_dir, active_role)
-    QMessageBox.information(
-        window, "전체 초기화", f"캐릭터 {len(restored)}명의 기본 가중치를 복원했습니다. 이후 새 버전에 따라 갱신됩니다.",
-    )
-
-
-def reset_config_form(window, config_dir, bundled_config_dir):
-    """Legacy slot: retain the former discard-draft behavior for callers."""
-    del bundled_config_dir
-    _reload_after_weight_reset(window, config_dir, None)
 
 
 def save_config_data(window, data, config_dir):

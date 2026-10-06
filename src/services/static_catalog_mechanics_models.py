@@ -123,7 +123,9 @@ FORMULA_CHAPTER_ORDER = {
 }
 FORMULA_CHAPTER_ORDER.update({
     "持续直伤": 8,
+    "지속 직접 피해": 8,
     "环合基础": 9,
+    "사이클 기본": 9,
     "环合": 10,
     "倾陷": 11,
     "共享伤害": 12,

@@ -157,6 +157,17 @@ class StaticGameDataExtendedQueriesMixin(ForkPermanentPropertyProjectionMixin):
             stars_by_pack.setdefault(_official_pack_key(pack_id), []).append(row)
 
         permanent_by_fork: dict[str, list[dict[str, Any]]] = {}
+        review_by_fork: dict[str, str] = {}
+        if self._one(
+            "SELECT 1 AS found FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'fork_permanent_review'"
+        ) is not None:
+            review_by_fork = {
+                str(row["fork_id"]): str(row["status"])
+                for row in self._rows(
+                    "SELECT fork_id, status FROM fork_permanent_review"
+                )
+            }
         table_exists = self._one(
             "SELECT 1 AS found FROM sqlite_master "
             "WHERE type = 'table' AND name = 'fork_permanent_property'"
@@ -189,6 +200,9 @@ class StaticGameDataExtendedQueriesMixin(ForkPermanentPropertyProjectionMixin):
             )
             template["permanent_properties"] = permanent_by_fork.get(
                 str(template.get("fork_id") or ""), []
+            )
+            template["permanent_review_status"] = review_by_fork.get(
+                str(template.get("fork_id") or "")
             )
             template["cultivation_recommendations"] = recommendations_by_fork.get(
                 str(template.get("fork_id") or ""), []

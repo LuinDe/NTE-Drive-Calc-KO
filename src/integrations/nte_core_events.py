@@ -1,4 +1,4 @@
-# 合并高频战斗摘要并保持其他 nte-core 事件的可靠顺序。
+# 合并可替换的完整观测并保持其他 nte-core 事件的可靠顺序。
 """Coalescing queue used by the nte-core callback dispatcher."""
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ def _queued_event_method(item: object) -> str | None:
 
 
 class CoalescingEventQueue:
-    """Keep reliable event order while retaining only the latest battle summary."""
+    """Keep reliable order while coalescing cumulative summary/item observations."""
 
     def __init__(self) -> None:
         self._items: deque[object] = deque()
@@ -26,12 +26,10 @@ class CoalescingEventQueue:
 
     def put(self, item: object) -> None:
         with self._condition:
-            if _queued_event_method(item) == "event.battle.summary":
+            method = _queued_event_method(item)
+            if method in {"event.battle.summary", "event.inventory.items_observed"}:
                 for index in range(len(self._items) - 1, -1, -1):
-                    if (
-                        _queued_event_method(self._items[index])
-                        == "event.battle.summary"
-                    ):
+                    if _queued_event_method(self._items[index]) == method:
                         del self._items[index]
                         break
             self._items.append(item)
@@ -55,4 +53,3 @@ class CoalescingEventQueue:
 
     def get_nowait(self) -> object:
         return self.get(timeout=0.0)
-

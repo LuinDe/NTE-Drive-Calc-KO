@@ -36,7 +36,7 @@ def _quality_key(value: Any) -> str:
     return text or "unknown"
 
 
-@lru_cache(maxsize=48)
+@lru_cache(maxsize=256)
 def representative_module_item_id(shape: str, quality: str) -> str:
     try:
         with StaticGameDataDao() as static_dao:
@@ -52,7 +52,7 @@ def representative_module_item_id(shape: str, quality: str) -> str:
     return ""
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=256)
 def representative_core_item_id(suit_id: str, quality: str) -> str:
     try:
         with StaticGameDataDao() as static_dao:

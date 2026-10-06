@@ -38,10 +38,12 @@ def show_official_role_replacement(
     *,
     context_key: str = "saved",
     on_saved: Callable[[], None] | None = None,
+    prepared_candidates: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Show, persist and report one official-role replacement operation."""
 
-    candidates = replacement_candidates_for_official_role(detail, context_key, target)
+    candidates = (prepared_candidates if prepared_candidates is not None
+                  else replacement_candidates_for_official_role(detail, context_key, target))
     if not candidates:
         QMessageBox.information(
             window,

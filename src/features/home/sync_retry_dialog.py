@@ -102,7 +102,7 @@ class SyncRetryDialog(QDialog):
             guidance = inventory_sync_error_guidance(
                 state.error_code, state.error,
                 capture_source="native" if self.native else "packet",
-            ).replace("처리:", "다음 단계:")
+            ).replace("처리:", "다음 단계:").replace("해결:", "다음 단계:")
             self.detail.setText("상태: 재시작 동기화가 완료되지 않았지만 저장된 가방은 계속 사용할 수 있습니다.\n" + guidance)
             self.detail.setToolTip(
                 f"오류 코드: {state.error_code or '未分类'}; 자세한 원인은 검사 상세 정보 또는 계정 로그를 확인하세요."

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.observability import log_event
+from src.integrations.nte_core_protocol import NteCoreProcessError
 from src.services.account_settings_service import AccountSettingsService
 from src.services.all_item_snapshot_storage import store_all_item_snapshot
 from src.services.raw_capture_retention import prune_raw_capture_files
@@ -25,6 +26,7 @@ from .inventory_sync_logging import (
 )
 from .inventory_snapshot_stabilizer import InventorySnapshotStabilizer, SnapshotOfferResult
 from .inventory_source_capabilities import has_native_inventory_uids, is_visual_inventory_source
+from .packet_item_observation_sync import PacketItemObservationSync
 
 
 def _utc_now() -> str:
@@ -69,7 +71,9 @@ def _snapshot_waiting_message(summary, has_character_list):
 
 def run_inventory_sync(service: Any) -> None:
     client: InventoryCoreClient | None = None
+    packet_items: PacketItemObservationSync | None = None
     fatal_error: Exception | None = None
+    stop_reason = "stop_requested"
     diagnostics = InventorySyncDiagnostics(service._operation_context)
     sync_stage = "loading_settings"
     stabilizer: InventorySnapshotStabilizer | None = None
@@ -128,6 +132,9 @@ def run_inventory_sync(service: Any) -> None:
             client.start()
             client.add_event_handler("event.inventory.snapshot", service._on_inventory_event)
             client.add_event_handler("event.capture.status", service._on_capture_status_event)
+            if not native and "inventory_observed_items_v1" in (client.hello_result or {}).get("capabilities", ()):
+                packet_items = PacketItemObservationSync(service, dao, settle_seconds)
+                client.add_event_handler("event.inventory.items_observed", packet_items.on_event)
             log_event(
                 "INFO",
                 "inventory_sync.core_connected",
@@ -245,6 +252,8 @@ def run_inventory_sync(service: Any) -> None:
                     snapshot_id=current_id,
                 )
                 event = service._take_latest_event()
+                if packet_items is not None:
+                    packet_items.receive_latest()
                 if event is not None:
                     sync_stage = "processing_event"
                     for source_snapshot_id, items, observed_at, sequence in (
@@ -347,9 +356,14 @@ def run_inventory_sync(service: Any) -> None:
                             added_count=0,
                             removed_count=0,
                         )
+                        if (current_summary and current_summary.get("source") == "nte_core"
+                            and (not native or client.confirm_inventory_snapshot(event["params"].get("native_snapshot")))):
+                            service._record_inventory_observation(event["params"])
 
                 sync_stage = "listening"
                 now = time.monotonic()
+                if packet_items is not None:
+                    packet_items.save_if_stable(now)
                 stable = stabilizer.ready(now=now)
                 if stable is None or now < retry_save_at:
                     continue
@@ -413,6 +427,8 @@ def run_inventory_sync(service: Any) -> None:
                 previous_item_count = current_summary.get("stored_item_count") if current_summary else None
                 previous_source = current_summary.get("source") if current_summary else None
                 current_id = snapshot_id
+                if packet_items is not None:
+                    packet_items.on_inventory_snapshot_committed(snapshot_id)
                 current_has_character_instances = dao.snapshot_has_independent_character_instances(snapshot_id)
                 committed_summary = dao.inventory_snapshot_summary(snapshot_id) or {}
                 current_summary = committed_summary
@@ -491,17 +507,29 @@ def run_inventory_sync(service: Any) -> None:
                     error=None,
                     error_code=None,
                 )
+                if current_summary and current_summary.get("source") == "nte_core":
+                    service._record_inventory_observation(stable.payload)
                 sync_stage = "listening"
-    except InventorySyncCancelled:
-        pass
+    except InventorySyncCancelled as exc:
+        # Only classify from bounded owner state; exception text can contain
+        # third-party payloads and does not prove who requested cancellation.
+        stop_reason = (
+            "stop_requested" if service._stop_requested.is_set() else
+            "context_changed" if service._context_is_current is not None and not service._context_is_current() else
+            exc.reason if exc.reason != "operation_cancelled" else
+            "native_session_cancelled" if service.capture_source == "native" else "operation_cancelled"
+        )
     except Exception as exc:
         fatal_error = exc
+        stop_reason = ("connection_lost" if service.capture_source == "native"
+                       and isinstance(exc, NteCoreProcessError) else "operation_failed")
         log_event(
             "ERROR",
             "inventory_sync.failed",
             "가방 동기화 서비스가 비정상 중지되었습니다",
             service._operation_context,
             failure_stage=sync_stage,
+            stop_reason=stop_reason,
             error=exc,
             error_code=(
                 str(getattr(exc, "domain_code"))
@@ -515,6 +543,7 @@ def run_inventory_sync(service: Any) -> None:
             running=False,
             capturing=False,
             error=f"{type(exc).__name__}: {exc}",
+            stop_reason=stop_reason,
             error_code=(
                 str(getattr(exc, "domain_code"))
                 if getattr(exc, "domain_code", None)
@@ -523,6 +552,11 @@ def run_inventory_sync(service: Any) -> None:
         )
     finally:
         if client is not None:
+            if packet_items is not None:
+                try:
+                    client.remove_event_handler("event.inventory.items_observed", packet_items.on_event)
+                except Exception:
+                    pass
             try:
                 client.remove_event_handler("event.inventory.snapshot", service._on_inventory_event)
             except Exception:
@@ -552,6 +586,8 @@ def run_inventory_sync(service: Any) -> None:
                 "inventory_sync.stopped",
                 "가방 동기화가 중지되었습니다",
                 service._operation_context,
+                stop_reason=stop_reason,
+                stop_stage=sync_stage,
             )
             service._publish(
                 "stopped",
@@ -559,6 +595,7 @@ def run_inventory_sync(service: Any) -> None:
                 running=False,
                 capturing=False,
                 pending_item_count=None,
+                stop_reason=stop_reason,
             )
 
 

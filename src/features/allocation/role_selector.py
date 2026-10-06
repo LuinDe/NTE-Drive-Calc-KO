@@ -6,8 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QMimeData, QTimer, Qt, Signal
-from PySide6.QtGui import QDrag, QPainter, QPixmap
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -30,6 +29,7 @@ from src.features.allocation.priority_groups import (
     normalize_priority_links,
 )
 from src.features.allocation.role_selector_visuals import role_avatar
+from src.features.allocation.priority_role_button import PriorityRoleButton
 from src.domain.role_name_order import role_name_sort_key
 from src.solver.set_effects import FOUR_PIECE, normalize_set_effect_mode
 
@@ -59,65 +59,6 @@ def normalize_weapons_db(weapons_db) -> dict:
             if name:
                 normalized[name] = info
     return normalized
-
-
-class PriorityRoleButton(QPushButton):
-    """Role chip button that can be clicked to remove or dragged to reorder."""
-
-    def __init__(self, selector: "RoleSelector", role: str, index: int):
-        super().__init__(role)
-        self.selector = selector
-        self.role = role
-        self.index = index
-        self._drag_start_pos = None
-        self.setAcceptDrops(True)
-        self.setCursor(Qt.OpenHandCursor)
-        self.clicked.connect(lambda _checked=False: selector._toggle(role))
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_start_pos = event.position().toPoint()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if not (event.buttons() & Qt.LeftButton) or self._drag_start_pos is None:
-            super().mouseMoveEvent(event)
-            return
-        if (event.position().toPoint() - self._drag_start_pos).manhattanLength() < 8:
-            super().mouseMoveEvent(event)
-            return
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setText(str(self.index))
-        drag.setMimeData(mime)
-        source_widget = self.parentWidget() or self
-        drag.setPixmap(self._make_drag_pixmap(source_widget))
-        drag.setHotSpot(self.mapTo(source_widget, event.position().toPoint()))
-        drag.exec(Qt.MoveAction)
-
-    def _make_drag_pixmap(self, source_widget):
-        raw = source_widget.grab()
-        if raw.isNull():
-            return raw
-        pixmap = QPixmap(raw.size())
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setOpacity(0.72)
-        painter.drawPixmap(0, 0, raw)
-        painter.end()
-        return pixmap
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasText():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        try:
-            source_index = int(event.mimeData().text())
-        except ValueError:
-            return
-        self.selector._drop_selected_on(source_index, self.index)
-        event.acceptProposedAction()
 
 
 from src.features.allocation.role_selector_preferences import RoleSelectorPreferencesMixin
@@ -360,11 +301,7 @@ class RoleSelector(RoleSelectorPreferencesMixin, QWidget):
             item = QFrame()
             item.setFixedSize(self._priority_role_frame_width(name), 48)
             item.setCursor(Qt.PointingHandCursor)
-            item.setToolTip(f"{name}: 아바타나 캐릭터 이름을 클릭하면 대기 영역으로 되돌립니다")
-            item.mousePressEvent = (
-                lambda event, role=name: self._toggle(role)
-                if event.button() == Qt.LeftButton else event.ignore()
-            )
+            item.setToolTip(f"{name}: 아바타나 캐릭터 이름을 클릭하면 대기 영역으로 되돌림; 누른 채 드래그하면 우선순위 조정")
             item.setStyleSheet(
                 themed_style(
                     "QFrame{background:#161b22;border:1px solid #30363d;border-radius:7px}"
@@ -375,16 +312,14 @@ class RoleSelector(RoleSelectorPreferencesMixin, QWidget):
             item_layout.setContentsMargins(6, 6, 6, 6)
             item_layout.setSpacing(5)
 
-            item_layout.addWidget(self._role_avatar(name, 36))
-
-            name_btn = PriorityRoleButton(self, name, index)
+            name_btn = PriorityRoleButton(self, name, index, avatar=self._role_avatar(name, 36))
             name_btn.setObjectName("priorityRoleName")
-            name_btn.setToolTip(f"{name}: 클릭하면 현재 우선순위에서 제외; 뒤로 드래그하면 우선순위 조정")
-            name_btn.setFixedWidth(self._priority_role_name_width())
+            name_btn.setToolTip(f"{name}: 클릭하면 현재 우선순위에서 제외; 아바타나 캐릭터 이름을 누른 채 드래그하면 우선순위 조정")
+            name_btn.setFixedSize(self._priority_role_name_width() + 41, 36)
             name_btn.setStyleSheet(
                 themed_style(
                     "QPushButton{background:transparent;color:#c9d1d9;border:none;"
-                    "padding:3px 5px;font-family:'Microsoft YaHei UI';"
+                    "padding:0;font-family:'Microsoft YaHei UI';"
                     "font-size:13px;font-weight:700;text-align:left}"
                     "QPushButton:hover{color:#c9d1d9}"
                 )
@@ -491,7 +426,7 @@ class RoleSelector(RoleSelectorPreferencesMixin, QWidget):
 
     def _set_custom_weapon(self, name, text):
         weapon = str(text or "").strip()
-        if weapon and weapon != self._default_weapon_for_role(name):
+        if weapon:
             self.custom_weapons[name] = weapon
         else:
             self.custom_weapons.pop(name, None)
@@ -532,14 +467,18 @@ class RoleSelector(RoleSelectorPreferencesMixin, QWidget):
     def _automatic_crit_rate_cap(self, name: str, weapon_name: str) -> float | None:
         """Leave room for the selected fork and enabled level-10 affinity."""
 
-        fork_crit = self._active_fork_crit_rate(name, weapon_name) or 0.0
+        fork_crit = self._active_fork_crit_rate(name, weapon_name)
         affinity_crit = self._likeability_crit_rate(name)
-        if fork_crit <= 0.0 and affinity_crit <= 0.0:
+        if fork_crit is None:
             return None
         return round(max(0.0, 100.0 - fork_crit - affinity_crit * 100.0), 4)
 
     def _active_fork_crit_rate(self, name: str, weapon_name: str) -> float | None:
         role = self.all_roles.get(name) or {}
+        if role.get("is_custom") and not weapon_name:
+            return 0.0
+        if name in self.custom_weapons:
+            return self._weapon_crit_rate(weapon_name)
         if weapon_name == str(role.get("default_weapon") or ""):
             value = role.get("active_fork_crit_rate_bonus")
             if value is not None:
@@ -547,18 +486,27 @@ class RoleSelector(RoleSelectorPreferencesMixin, QWidget):
                     return max(0.0, float(value))
                 except (TypeError, ValueError):
                     pass
+            if role.get("active_fork_crit_source_resolved"):
+                return None
         return self._weapon_crit_rate(weapon_name)
 
     def _weapon_crit_rate(self, weapon_name):
         info = self.weapons_db.get(weapon_name)
         if not isinstance(info, dict):
             return None
-        stats = {}
-        level_stats = info.get("level_sub_stats")
-        if isinstance(level_stats, dict) and level_stats:
-            stats = level_stats.get("80") or level_stats.get(80) or next(iter(level_stats.values()), {})
+        if info.get("permanent_properties_known") is False:
+            return None
+        stats = info.get("sub_stats")
         if not isinstance(stats, dict) or not stats:
-            stats = info.get("sub_stats", {}) if isinstance(info.get("sub_stats", {}), dict) else {}
+            level_stats = info.get("level_sub_stats")
+            if isinstance(level_stats, dict) and level_stats:
+                levels = [level for level in level_stats if str(level).isdigit()]
+                if levels:
+                    stats = level_stats[max(levels, key=lambda level: int(level))]
+        if not isinstance(stats, dict):
+            return None
+        if not stats and info.get("permanent_properties_known") is not True:
+            return None
         for key, value in stats.items():
             normalized = str(key or "").replace("%", "")
             if "暴击率" in normalized or "鏆村嚮鐜" in normalized:
@@ -566,18 +514,18 @@ class RoleSelector(RoleSelectorPreferencesMixin, QWidget):
                     return max(0.0, float(value))
                 except (TypeError, ValueError):
                     return None
-        return None
+        return 0.0
 
     def get_crit_rate_baselines(self):
-        """Return active fork-only crit for the role-priority floor check.
+        """Return frozen non-equipment crit for the role-priority floor check.
 
         The solver already owns the universal 5% base rate and all selected
-        equipment stats.  This value contains the selected fork's permanent,
-        breakthrough and level crit projection exactly once.
+        equipment stats. This value contains the selected fork's permanent,
+        breakthrough and level crit plus enabled affinity exactly once.
         """
 
         return {
-            name: crit_rate
+            name: round(crit_rate + self._likeability_crit_rate(name) * 100.0, 4)
             for name in self.selected
             if (
                 crit_rate := self._active_fork_crit_rate(

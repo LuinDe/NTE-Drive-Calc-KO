@@ -3,13 +3,13 @@ from copy import deepcopy
 from time import monotonic
 
 from src.services.native_battle_scopes import team_configuration_unchanged, validate_first_hit
-from src.services.battle_capture_build_context import PANEL_DOMAINS
+from src.services.battle_capture_build_context import PANEL_DOMAINS, native_equipment_projection
 
 
 def first_hit_snapshot_ready(snapshot, attempt, record):
     """Only a complete read with matching first-hit evidence can become frozen."""
-    return (snapshot.get("state") == "observed" and {"character", "inventory", "team"} <= (snapshot.get("domains") or {}).keys()
-            and "inventory_projection" in snapshot and "character_projection" in snapshot
+    return (snapshot.get("state") == "observed" and {"character", "team"} <= (snapshot.get("domains") or {}).keys()
+            and "character_projection" in snapshot and native_equipment_projection(snapshot) is not None
             and validate_first_hit(snapshot, attempt, record) is None)
 
 
@@ -25,9 +25,9 @@ def retain_scope_pending_snapshot(previous, candidate, attempt, record):
                                          for k in ("providerId", "domain", "domainKey"))))
 
     if (previous and previous.get("state") == "observed"
-            and "character_projection" in previous and "inventory_projection" in previous
+            and "character_projection" in previous
             and ((any(matches_first_domain(previous, domain) and not matches_first_domain(candidate, domain)
-                     for domain in ("character", "inventory", "team")))
+                     for domain in ("character", "team")))
                  or (team_configuration_unchanged(previous, attempt, record)
                      and not team_configuration_unchanged(candidate, attempt, record)))):
         return deepcopy(previous)
@@ -61,8 +61,8 @@ class NativeBattlePreparation:
         frozen = read()
         self.retry_at = monotonic() + 2.0
         domains = frozen.get("domains") or {}
-        if (frozen.get("state") == "observed" and {"character", "inventory", "team"} <= domains.keys()
-                and "inventory_projection" in frozen and "character_projection" in frozen):
+        if (frozen.get("state") == "observed" and {"character", "team"} <= domains.keys()
+                and "character_projection" in frozen and native_equipment_projection(frozen) is not None):
             if previous and previous.get("revision") != domains["character"].get("revision"):
                 frozen["prior_character_observation"] = deepcopy(previous)
             self.snapshot = frozen
@@ -92,5 +92,6 @@ def observe_pinned_scopes(lease, record, attempts, final, stop_requested):
     # Warm the live cache for the next first hit. Its bytes never replace a
     # pinned attempt, and completion of this read is not a capture prerequisite.
     if not final:
-        lease._preparation.prepare(record, attempts, lambda: lease._read_battle_snapshot(stop_requested))
+        lease._preparation.prepare(record, attempts, lambda: lease._read_battle_snapshot(
+            stop_requested, require_current=True))
     return {"state": "scoped", "scopes": deepcopy(lease._scope_snapshots)} if changed else None

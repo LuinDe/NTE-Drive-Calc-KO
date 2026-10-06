@@ -441,7 +441,7 @@ class MonsterCatalogPage(FeastCatalogBrowserMixin, QWidget):
     ) -> tuple[BrowseCard, ...]:
         slot_sections = tuple(section for section in detail.sections if any(
             section.title.startswith(prefix)
-            for prefix in ("스폰 슬롯", "몬스터 풀 구성원", "템플릿 바인딩")
+            for prefix in ("스폰 슬롯", "몬스터 풀 멤버", "몬스터 풀 구성원", "템플릿 바인딩")
         ) and "프로필" not in section.title)
         if not slot_sections and entry.play_mode == "feast":
             slot_sections = tuple(section for section in detail.sections if section.title == "정식 콘텐츠 설정")
@@ -479,7 +479,7 @@ class MonsterCatalogPage(FeastCatalogBrowserMixin, QWidget):
                 half=entry.secondary_label if entry.play_mode == "outer_realm" else "",
                 slot=(
                     section.title
-                    if section.title.startswith(("스폰 슬롯", "몬스터 풀 구성원"))
+                    if section.title.startswith(("스폰 슬롯", "몬스터 풀 멤버", "몬스터 풀 구성원"))
                     else ""
                 ),
                 world_level_selector=entry.play_mode in {
@@ -487,7 +487,7 @@ class MonsterCatalogPage(FeastCatalogBrowserMixin, QWidget):
                 },
             )
             cards.append(BrowseCard(
-                localized_name, f"{section.title} · 수량 {fields.get('数量', '暂无数据')}",
+                localized_name, f"{section.title} · 수량 {fields.get('수량', '데이터 없음')}",
                 _PLAY_LABELS.get(entry.play_mode, entry.play_mode),
                 self._formal_icon(target_detail),
                 (lambda checked=False, value=target_detail, ctx=context: self.open_detail(value, ctx))

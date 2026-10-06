@@ -530,6 +530,12 @@ class BattleAxisDaoMixin(UserDataDaoMixinHost):
                 capture_id=capture_id,
                 intervals=record_payload.get("time_stop_intervals"),
             )
+            if isinstance(record_payload.get("calc_capture_context"), Mapping):
+                from .battle_equipment_storage import compact_equipment_context
+                record_payload["calc_capture_context"] = compact_equipment_context(
+                    record_payload["calc_capture_context"], frozen_equipment,
+                    {row[0] for row in selected_profiles},
+                )
             raw_record_json = (
                 _json_object(record_payload, "battle record")
                 if record_payload

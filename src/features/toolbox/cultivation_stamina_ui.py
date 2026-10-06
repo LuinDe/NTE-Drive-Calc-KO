@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -64,6 +64,17 @@ class CultivationStaminaControls(QFrame):
     def values(self) -> tuple[int, int]:
         return self.hunter_level.value(), int(self.identification_level.currentData())
 
+    def restore_values(self, hunter_level: int, identification_level: int | None) -> None:
+        projection = project_identification_level(hunter_level, effective_level=identification_level)
+        with QSignalBlocker(self), QSignalBlocker(self.hunter_level):
+            self.hunter_level.setValue(hunter_level)
+            self._refresh_identification()
+            with QSignalBlocker(self.identification_level):
+                index = self.identification_level.findData(projection.effective_level)
+                if index < 0:
+                    raise ValueError("기록의 감별 레벨이 현재 범위와 일치하지 않습니다")
+                self.identification_level.setCurrentIndex(index)
+
     def _refresh_identification(self) -> None:
         previous = self.identification_level.currentData()
         projection = project_identification_level(self.hunter_level.value())
@@ -74,7 +85,7 @@ class CultivationStaminaControls(QFrame):
         self.identification_level.clear()
         for level in levels:
             suffix = "(현재)" if level == projection.native_level else "(하향)"
-            self.identification_level.addItem(f"감정 {level} {suffix}", level)
+            self.identification_level.addItem(f"감별 {level} {suffix}", level)
         selected = previous if previous in levels else projection.native_level
         self.identification_level.setCurrentIndex(levels.index(selected))
         self.identification_level.blockSignals(False)

@@ -285,7 +285,7 @@ class StaticCatalogMiscProvider:
     def _relation_groups(detail: MiscDetail) -> tuple[CatalogRelationGroup, ...]:
         supported = _ENTITY_RELATIONS.get(detail.entity_kind, ())
         counts = next(
-            (section for section in detail.sections if section.title == "分页关系规模"),
+            (section for section in detail.sections if section.title in ("페이징 관계 규모", "分页关系规模")),
             None,
         )
         if counts is None:
@@ -330,7 +330,7 @@ class StaticCatalogMiscProvider:
                 "blueprint", values.get("target_asset_path"), "대상 리소스 보기"
             )
         elif relation_kind == "tags":
-            source_asset_path = values.get("来源资源路径")
+            source_asset_path = values.get("출처 리소스 경로") or values.get("来源资源路径")
             tag_name = values.get("Gameplay Tag")
             target_kind, target_key, label = (
                 "gameplay_tag",

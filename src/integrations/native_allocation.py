@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 from concurrent.futures import CancelledError
+from loguru import logger
 
 from src.integrations.analysis_core_release import create_bundled_analysis_client
 from src.integrations.native_allocation_wire import freeze
@@ -23,7 +24,7 @@ def create_allocation_executor(*, static_database_path, cancel_check=None):
         identity = client.version()
     except NativeAnalysisCancelled:
         raise CancelledError("분배 계산이 취소되었습니다") from None
-    if "allocation_v1" not in identity.get("capabilities", []):
+    if "allocation_v2" not in identity.get("capabilities", []):
         raise NativeAnalysisError("분석 컴포넌트의 실제 기능이 콘솔 분배 목록과 일치하지 않음")
 
     def execute(request, scorer):
@@ -36,6 +37,22 @@ def create_allocation_executor(*, static_database_path, cancel_check=None):
         try:
             plans = client.allocate(payload, checkpoint=checkpoint)
             result = restore(plans, request)
+            for group in request.priority_groups:
+                selected = [result[role] for role in group if role in result]
+                if len(selected) < 2:
+                    continue
+                progress = selected[0].get("group_search") or {}
+                logger.info(
+                    "같은 등급 그룹 분배 진단: 구성원={} 첫 라운드 완료={} 하나 제외 시도={} 최종 완료={} "
+                    "복구 후보={} 예산 절단={} 후보 절단={}",
+                    progress.get("members", len(selected)),
+                    progress.get("initial_completed", 0),
+                    progress.get("leave_one_out_attempts", 0),
+                    progress.get("completed", sum(bool(p.get("valid")) for p in selected)),
+                    sum(int((p.get("group_search") or {}).get("recovery_candidates", 0)) for p in selected),
+                    any(bool(p.get("budget_exhausted")) for p in selected),
+                    any(bool(p.get("candidate_truncated")) for p in selected),
+                )
         except NativeAnalysisCancelled:
             raise CancelledError("분배 계산이 취소되었습니다") from None
         checkpoint()

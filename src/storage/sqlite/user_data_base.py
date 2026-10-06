@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from collections.abc import Iterable
 from pathlib import Path
 from types import TracebackType
@@ -15,6 +16,7 @@ from .user_data_support import (
     UserDataError,
     _utc_now,
 )
+from .user_data_migration_backup import backup_before_history_migration
 
 class UserDataDaoCore:
     """单个应用账号所拥有数据的读写边界。
@@ -51,7 +53,7 @@ class UserDataDaoCore:
                     account_id=str(account_id),
                     account_name=str(account_name or account_id),
                 )
-            self._migrate_schema()
+            self._migrate_schema(backup_existing=existed)
             self._validate_schema()
         except BaseException:
             self.close()
@@ -80,6 +82,19 @@ class UserDataDaoCore:
         if self._connection is None:
             raise UserDataError("사용자 데이터베이스 DAO가 닫혔습니다")
         return self._connection
+
+    @contextmanager
+    def read_consistent_state(self):
+        """Read related account pointers and immutable facts in one SQLite snapshot."""
+        connection = self._db()
+        owns_transaction = not connection.in_transaction
+        if owns_transaction:
+            connection.execute("BEGIN")
+        try:
+            yield self
+        finally:
+            if owns_transaction:
+                connection.rollback()
 
     def _initialize(self, schema_path: Path, *, account_id: str, account_name: str) -> None:
         if not schema_path.is_file():
@@ -115,7 +130,7 @@ class UserDataDaoCore:
         except (OSError, sqlite3.Error) as exc:
             raise UserDataError("사용자 데이터베이스를 초기화할 수 없습니다") from exc
 
-    def _migrate_schema(self) -> None:
+    def _migrate_schema(self, *, backup_existing: bool = True) -> None:
         connection = self._db()
         try:
             row = connection.execute(
@@ -128,6 +143,8 @@ class UserDataDaoCore:
             raise UserDataError(
                 f"사용자 데이터베이스 구조 버전 {version}이(가) 현재 프로그램이 지원하는 {SCHEMA_VERSION}보다 높습니다"
             )
+        if backup_existing and version < 45 <= SCHEMA_VERSION:
+            backup_before_history_migration(self.database_path, version)
         try:
             for target_version in range(version + 1, SCHEMA_VERSION + 1):
                 migration_path = USER_MIGRATIONS.get(target_version)
@@ -141,6 +158,13 @@ class UserDataDaoCore:
                     connection.execute("PRAGMA foreign_keys = OFF")
                 try:
                     connection.execute("BEGIN IMMEDIATE")
+                    # Another account owner may have completed the same migration while we waited.
+                    actual_version = connection.execute(
+                        "SELECT MAX(version) FROM schema_migration"
+                    ).fetchone()[0]
+                    if actual_version >= target_version:
+                        connection.rollback()
+                        continue
                     self._prepare_migration(connection, target_version)
                     self._execute_migration_script(connection, migration_sql)
                     connection.execute(

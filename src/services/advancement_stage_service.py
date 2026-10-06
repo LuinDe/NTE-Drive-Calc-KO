@@ -182,20 +182,16 @@ def fork_permanent_stats(
 
     if not template or refinement_level is None:
         return {}
-    row = next(
-        (
-            item
-            for item in template.get("permanent_properties") or ()
-            if _integer(item.get("refinement_level")) == int(refinement_level)
-        ),
-        None,
-    )
-    if row is None:
-        return {}
-    property_id = str(row.get("property_id") or "")
-    if not property_id:
-        return {}
-    return {property_id: float(row.get("property_value") or 0.0)}
+    totals: dict[str, float] = {}
+    for row in template.get("permanent_properties") or ():
+        if _integer(row.get("refinement_level")) != int(refinement_level):
+            continue
+        property_id = str(row.get("property_id") or "")
+        if property_id:
+            totals[property_id] = totals.get(property_id, 0.0) + float(
+                row.get("property_value") or 0.0
+            )
+    return totals
 
 
 def fork_active_panel_stats(

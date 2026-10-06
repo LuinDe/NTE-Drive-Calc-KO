@@ -32,9 +32,9 @@ class _ToggleSwitch(QCheckBox):
 
 
 class PluginsPage(QWidget):
-    def __init__(self, *, service, request_apply, open_settings, parent=None):
+    def __init__(self, *, service, request_apply, show_detection, parent=None):
         super().__init__(parent)
-        self.service, self.request_apply, self.open_settings = service, request_apply, open_settings
+        self.service, self.request_apply, self.show_detection = service, request_apply, show_detection
         self.cards = {}
         self.option_boxes = {}
         self._refresh_pending = False
@@ -65,8 +65,8 @@ class PluginsPage(QWidget):
         actions = QHBoxLayout()
         self.refresh_button = QPushButton("상태 새로고침")
         self.refresh_button.clicked.connect(self._request_refresh)
-        self.environment_button = QPushButton("검사 및 배포")
-        self.environment_button.clicked.connect(self._open_environment)
+        self.environment_button = QPushButton("검사 상세")
+        self.environment_button.clicked.connect(self.show_detection)
         actions.addWidget(self.refresh_button)
         actions.addWidget(self.environment_button)
         actions.addStretch()
@@ -136,7 +136,7 @@ class PluginsPage(QWidget):
             return "연결 대기 중", "active"
         if raw in {"현재 모드에서 활성화 불가", "연결 일시 중지됨"}:
             return raw, "warning"
-        if "미지원" in raw or "구성 패키지 업데이트" in raw or "업데이트 필요" in raw:
+        if "지원하지 않" in raw or "미지원" in raw or "구성 패키지 업데이트" in raw or "업데이트 필요" in raw or "不支持" in raw or "更新配套" in raw or "需要更新" in raw:
             return "컴포넌트 업데이트 필요", "error"
         if "실패" in raw or raw:
             return "연결 이상", "error"
@@ -183,7 +183,6 @@ class PluginsPage(QWidget):
             or ("Calc 종료 후 표시가 중지됩니다; 다음 시작 시 저장된 설정이 복원됩니다." if allowed else
                 "현재 모드는 플러그인을 지원하지 않습니다; 중위험 또는 개발 모드로 전환해 주세요.")
         )
-        self.environment_button.setText("검사 및 배포" if allowed else "작업 모드 설정")
         if result is not None and self._refresh_pending:
             self._refresh_pending = False
             self.refresh_button.setText("상태 새로고침")
@@ -196,10 +195,6 @@ class PluginsPage(QWidget):
         self.refresh_button.setText("새로고침 중…")
         self.refresh_button.setEnabled(False)
         self.request_apply()
-
-    def _open_environment(self) -> None:
-        target = "deployment" if self.service.policy.allowed("native_load") else "mode"
-        self.open_settings(target)
 
     def _update(self, **changes):
         projected_hp = changes.get("hp", self.service.settings.hp)

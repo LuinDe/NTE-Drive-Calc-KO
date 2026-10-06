@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from src.features.input_operation_entry import request_input_entry, show_input_unavailable
+from src.features.input_operation_entry import confirm_operation_recommendation, request_input_entry, show_input_unavailable
+from src.domain.work_mode import WorkMode
 
 import threading
 from pathlib import Path
@@ -325,6 +326,8 @@ def _preview_automatic_assemble_role(
     confirmed: bool = False,
 ) -> None:
     """确认后通过游戏界面自动化装配一个角色。"""
+    if not _confirm_automatic_assembly_recommendation(window):
+        return
     if not request_input_entry(window, "interface_input", "자동 장착"):
         return
 
@@ -354,6 +357,8 @@ def _preview_automatic_assemble_all_roles(
     role_names: list[str] | None = None,
 ) -> None:
     """确认后通过游戏界面自动化装配全部已保存角色。"""
+    if not _confirm_automatic_assembly_recommendation(window):
+        return
     if not request_input_entry(window, "interface_input", "자동 장착"):
         return
 
@@ -411,3 +416,14 @@ def _preview_automatic_assemble_all_roles(
         and _confirm_automatic_assembly_duplicate_warning(window)
     ):
         _start_automatic_equipment_assembly(window, [], slot_ids=selected_slot_ids)
+
+
+def _confirm_automatic_assembly_recommendation(window: Any) -> bool:
+    policy = getattr(window, "work_mode_service", None)
+    if policy is None or policy.settings.mode != WorkMode.MEDIUM:
+        return True
+    return confirm_operation_recommendation(
+        window, title="자동 장착 안내",
+        message="현재 중위험 작업 모드입니다. 고속 장착 사용을 강력히 권장합니다! 계속할까요?",
+        action_text="계속",
+    )

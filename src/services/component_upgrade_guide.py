@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from src.integrations.legacy_game_proxy import legacy_game_proxy_present
+from src.integrations.native_plugin_bundle import NATIVE_PLUGIN_LAYOUTS
 from src.services.deployed_plugin_inspection import inspect_deployed_native_plugin
 from src.services.equipment_plugin_deployment import (
     EquipmentPluginDeploymentError, mod_workspace_registry_snapshot,
@@ -45,7 +46,7 @@ def inspect_upgrade_evidence(*, application_root: Path, game_path: str,
     except OSError as error:
         return UpgradeEvidence("path_unknown", "이전 컴포넌트 상태 읽기에 실패했습니다.", type(error).__name__, method)
     old_workspace = str(deployment.get("workspace_path") or "")
-    old_record = has_record and deployment.get("deployment_layout") != "native-capture-v1"
+    old_record = has_record and deployment.get("deployment_layout") not in NATIVE_PLUGIN_LAYOUTS
     if proxy_present or old_record:
         try:
             registered, registry_path = mod_workspace_registry_snapshot()
@@ -85,6 +86,14 @@ def inspect_upgrade_evidence(*, application_root: Path, game_path: str,
             recorded_files=deployment.get("managed_files") or {},
         )
         compatible = inspection.files_compatible
+        if not compatible:   # KO patch: a foreign file is kept, so cleanup can never fix it - point to the Loader
+            from src.services.native_plugin_deployment import _ko_known_hashes
+            known = _ko_known_hashes(application_root, deployment.get("managed_files") or {})
+            foreign = [name for name, item in inspection.files.items()
+                       if item.present and item.sha256 not in known.get(name, ())]
+            if foreign:
+                return UpgradeEvidence("foreign", f"게임 폴더의 {', '.join(foreign)}은(는) 이 프로그램이 배포한 파일로 확인되지 않습니다(ReShade 등 다른 프로그램의 파일일 수 있음).",
+                                       '이 파일은 지우거나 덮어쓰지 않습니다. 로드 방식을 "네이티브 Loader (예비)"로 바꿔 주세요.', method)
     if not compatible:
         return UpgradeEvidence("update", "현재 컴포넌트가 이 버전에 동봉된 파일과 일치하지 않습니다.",
                                "먼저 게임과 런처를 종료하고 이전 구성 요소를 정리한 뒤, 현재 버전을 배포하세요.", method)

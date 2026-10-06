@@ -5,11 +5,15 @@ from collections import Counter
 from typing import Iterable
 
 
-def blueprint_piece_signature(blueprint: dict) -> tuple[tuple[str, int], ...]:
-    """Return a stable identity for the exact shape/count combination."""
-    pieces = list(blueprint.get("set_pieces") or []) + list(blueprint.get("extra_pieces") or [])
-    counts = Counter(str(piece) for piece in pieces)
-    return tuple(sorted(counts.items()))
+def blueprint_piece_signature(blueprint: dict) -> tuple:
+    """Keep set qualification distinct from identical total board geometry."""
+    set_counts = Counter(str(piece) for piece in blueprint.get("set_pieces") or [])
+    extra_counts = Counter(str(piece) for piece in blueprint.get("extra_pieces") or [])
+    return (
+        str(blueprint.get("set_effect_mode") or ""),
+        tuple(sorted(set_counts.items())),
+        tuple(sorted(extra_counts.items())),
+    )
 
 
 def dedupe_blueprints_by_piece_signature(blueprints: Iterable[dict]) -> list[dict]:

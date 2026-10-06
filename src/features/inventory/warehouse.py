@@ -8,6 +8,7 @@ viewport, which keeps a 2,000-item inventory responsive.
 
 from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -82,10 +83,32 @@ def configure_warehouse_view_template_roots(
     _TEMPLATE_ROOTS = roots or (bundled_config_dir() / "templates",)
     if asset_root is not None:
         _ASSET_ROOT = Path(asset_root).resolve()
+    _role_avatar_index.cache_clear()
     _legacy_character_avatar.cache_clear()
+    _equipment_item_pixmap.cache_clear()
 
 
-@lru_cache(maxsize=96)
+@lru_cache(maxsize=16)
+def _role_avatar_index(role_root_str: str) -> tuple[dict[str, Path], list[tuple[str, Path]]]:
+    """Index role avatar PNGs in memory to eliminate runtime filesystem scans."""
+    role_root = Path(role_root_str)
+    if not role_root.is_dir():
+        return {}, []
+    exact_map: dict[str, Path] = {}
+    normalized_list: list[tuple[str, Path]] = []
+    try:
+        for entry in os.scandir(role_root):
+            if entry.is_file() and entry.name.lower().endswith(".png"):
+                path = Path(entry.path)
+                exact_map[path.stem] = path
+                normalized = normalize_role_avatar_name(path.stem)
+                normalized_list.append((normalized, path))
+    except OSError:
+        pass
+    return exact_map, normalized_list
+
+
+@lru_cache(maxsize=512)
 def _legacy_character_avatar(character_name: str) -> QPixmap:
     """Use the shipped config/templates/roles portrait, tolerating decorative aliases."""
     if not character_name:
@@ -94,24 +117,24 @@ def _legacy_character_avatar(character_name: str) -> QPixmap:
     normalized_name = normalize_role_avatar_name(avatar_name)
     for root in _template_root_candidates():
         role_root = root / "roles"
-        direct_path = role_root / f"{avatar_name}.png"
-        if direct_path.is_file():
-            return QPixmap(str(direct_path))
+        exact_map, normalized_list = _role_avatar_index(str(role_root))
+        if avatar_name in exact_map:
+            return _equipment_item_pixmap(str(exact_map[avatar_name]))
         candidates = [
-            path for path in role_root.glob("*.png")
-        if normalize_role_avatar_name(path.stem) == normalized_name
+            path for norm, path in normalized_list
+            if norm == normalized_name
         ]
         if len(candidates) == 1:
-            return QPixmap(str(candidates[0]))
+            return _equipment_item_pixmap(str(candidates[0]))
         fuzzy_candidates = [
-            path for path in role_root.glob("*.png")
+            path for norm, path in normalized_list
             if normalized_name and (
-            normalize_role_avatar_name(path.stem).startswith(normalized_name)
-            or normalized_name.startswith(normalize_role_avatar_name(path.stem))
+                norm.startswith(normalized_name)
+                or normalized_name.startswith(norm)
             )
         ]
         if len(fuzzy_candidates) == 1:
-            return QPixmap(str(fuzzy_candidates[0]))
+            return _equipment_item_pixmap(str(fuzzy_candidates[0]))
     return QPixmap()
 
 
@@ -238,7 +261,7 @@ def warehouse_core_pixmap(suit_id: Any, quality: str = "Gold") -> QPixmap:
     return _equipment_item_pixmap(str(path or ""))
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=16)
 def _asset_catalog(asset_root: str) -> GameUiAssetCatalog:
     return GameUiAssetCatalog(asset_root)
 
@@ -308,7 +331,7 @@ def _character_icon(
     return _asset_catalog(str(root.expanduser().resolve())).character_icon(normalized_id)
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=2048)
 def _equipment_item_pixmap(path_text: str) -> QPixmap:
     path = Path(path_text)
     return QPixmap(str(path)) if path.is_file() else QPixmap()

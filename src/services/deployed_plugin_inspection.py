@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from src.integrations.native_plugin_bundle import (
-    NATIVE_PLUGIN_DEPLOYMENT_PATHS, NATIVE_PLUGIN_LAYOUT, NativePluginBundleInspection, inspect_native_plugin_bundle,
+    NATIVE_PLUGIN_LAYOUT, NativePluginBundleInspection, inspect_native_plugin_bundle,
 )
 from src.services.equipment_plugin_deployment import EquipmentPluginDeploymentError, game_executable
 
@@ -32,11 +32,12 @@ class NativePluginDeploymentInspection:
     files: Mapping[str, NativePluginFileInspection]
     bundle_ready: bool
     issues: tuple[str, ...]
+    expected_paths: tuple[str, ...]
     layout: str = NATIVE_PLUGIN_LAYOUT
 
     @property
     def files_compatible(self) -> bool:
-        return self.bundle_ready and set(self.files) == set(NATIVE_PLUGIN_DEPLOYMENT_PATHS.values()) and all(
+        return self.bundle_ready and bool(self.expected_paths) and set(self.files) == set(self.expected_paths) and all(
             item.matches_bundle for item in self.files.values()
         )
 
@@ -56,7 +57,7 @@ def inspect_deployed_native_plugin(
     except EquipmentPluginDeploymentError:
         game_directory = None
         issues.append("게임 메인 실행 파일 위치를 확인할 수 없습니다; 네이티브 배포 파일은 아직 검사하지 않았습니다.")
-    for role, relative in NATIVE_PLUGIN_DEPLOYMENT_PATHS.items():
+    for role, relative in bundle.deployment_paths.items():
         source = bundle.roles.get(role, "")
         expected = bundle.files.get(source, "")
         expected_size = bundle.file_sizes.get(source)
@@ -84,4 +85,5 @@ def inspect_deployed_native_plugin(
         )
     return NativePluginDeploymentInspection(
         game_directory, MappingProxyType(files), bundle.ready, tuple(issues),
+        expected_paths=tuple(bundle.deployment_paths.values()), layout=bundle.layout,
     )

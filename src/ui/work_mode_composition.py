@@ -30,6 +30,27 @@ def initialize_mode_policy(window):
 
 
 def initialize_mode_runtime(window):
+    from src.app.context import CallbackAccountLifecycle
+    from src.features.settings.performance_controller import PerformanceController
+    from src.features.settings.native_plugin_update_controller import NativePluginUpdateController
+    from src.services.native_plugin_maintenance import NativePluginMaintenance, active_feature_update_hint
+    from src.integrations.presentmon_metrics import PresentMon
+    from src.integrations.native_capture_process import native_capture_game_pid
+
+    window.performance_controller = PerformanceController(
+        context=window.app_context, policy=window.work_mode_service,
+        read_status=window.native_game_session.read_performance_status,
+        control=window.native_game_session.configure_performance,
+        trace_control=window.native_game_session.control_performance_trace,
+        frames=PresentMon(window.app_context.paths.root / "third_party/presentmon/PresentMon.exe",
+                          native_capture_game_pid), parent=window,
+    )
+    window.app_context.register_account_lifecycle(CallbackAccountLifecycle(
+        is_running=lambda: window.performance_controller.snapshot()["enabled"] or window.performance_controller.snapshot()['trace']['running'],
+        stop=window.performance_controller.stop,
+        rebuild=window.performance_controller.rebuild, start=lambda: None,
+    ))
+
     def game_running():
         # A bound live handle is enough; do not rescan all processes while syncing.
         owner = getattr(window, "auto_sync_controller", None)
@@ -59,6 +80,32 @@ def initialize_mode_runtime(window):
         request_check=window.work_mode_controller.check,
         request_enable_preflight=window.work_mode_controller.begin_sync_enable,
     )
+    window.work_mode_controller.attach_sync_enable_action(lambda: window.auto_sync_controller.set_enabled(True))
+
+    def check_update_blockers():
+        if window.work_mode_controller.is_transitioning:
+            raise RuntimeError('작업 모드를 전환하는 중입니다. 완료된 후 업데이트하세요.')
+        if window.battle_report_controller.is_running():
+            raise RuntimeError(active_feature_update_hint('battle_report'))
+        active_owner = window.global_hotkey_manager.active_owner
+        if active_owner is not None:
+            raise RuntimeError(active_feature_update_hint(active_owner))
+
+    maintenance = NativePluginMaintenance(
+        session=window.native_game_session, sync=window.auto_sync_controller,
+        performance=window.performance_controller, check_blockers=check_update_blockers,
+        reconnect=window.work_mode_controller.check,
+    )
+    window.native_plugin_update_controller = NativePluginUpdateController(
+        context=window.app_context, policy=window.work_mode_service,
+        session=window.native_game_session, loader=window._mod_plugin_loading_service,
+        generation=window.operation_generation, maintenance=maintenance, parent=window,
+    )
+    window.app_context.register_account_lifecycle(CallbackAccountLifecycle(
+        is_running=lambda: window.native_plugin_update_controller.running,
+        stop=window.native_plugin_update_controller.stop,
+        rebuild=lambda _account: None, start=lambda: None,
+    ))
     window.operation_entry = window.work_mode_controller.operation_entry
     window.operation_unavailable = window.work_mode_controller.operation_unavailable
 

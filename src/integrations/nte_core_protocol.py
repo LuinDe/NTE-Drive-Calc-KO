@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -16,8 +18,20 @@ MODS_PLUGIN_BUSY_CODES = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class NteCoreRequestContext:
+    """Local request identity only; never retain request or response payloads."""
+
+    method: str
+    executable_path: str | None
+    executable_sha256: str | None
+    handshake_confirmed: bool
+
+
 class NteCoreError(RuntimeError):
     """Base nte-core integration error."""
+
+    request_context: NteCoreRequestContext | None = None
 
 
 class NteCoreNotFoundError(NteCoreError):

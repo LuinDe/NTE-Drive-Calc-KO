@@ -2,8 +2,10 @@
 """Stable A–Z ordering for role pickers without changing character identity."""
 
 from __future__ import annotations
+from functools import lru_cache
 
 
+@lru_cache(maxsize=2048)
 def role_name_sort_key(name: str) -> tuple[str, str, str]:
     """Sort by the first meaningful character's initial, then full pinyin."""
 

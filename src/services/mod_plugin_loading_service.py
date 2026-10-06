@@ -20,9 +20,9 @@ from src.integrations.launcher_process import LauncherProcessProbeError, selecte
 from src.integrations.operation_guard import require_operation
 from src.integrations.legacy_game_proxy import remove_legacy_game_proxy
 from src.integrations.game_component_bundle import inspect_game_component_bundle
-from src.integrations.native_plugin_bundle import NATIVE_PLUGIN_LAYOUT
+from src.integrations.native_plugin_bundle import NATIVE_PLUGIN_LAYOUTS, HOT_PLUGIN_LAYOUTS, HOT_PLUGIN_DEPLOYMENT_PATHS, PERFORMANCE_DEPLOYMENT_PATHS, HUD_DEPLOYMENT_PATHS
 from src.services.native_loader_workspace import (
-    NATIVE_LOADER_PAYLOAD_RELATIVE_PATH, inspect_native_loader_workspace, prepare_native_loader_workspace,
+    native_loader_payload_relative, inspect_native_loader_workspace, prepare_native_loader_workspace,
 )
 from src.services.native_plugin_deployment import (
     NativeComponentFilesDeployment, NativeComponentFilesPendingCleanup,
@@ -103,6 +103,8 @@ class ModLoaderRuntimeContract(Protocol):
 
     def require_payload_load_mode(self, mode: str) -> None: ...
 
+    def require_payload_kind(self, kind: str) -> None: ...
+
 
 class ModPluginLoadingService:
     """Keep proxy deployment and managed Loader sessions mutually exclusive."""
@@ -113,7 +115,7 @@ class ModPluginLoadingService:
         application_root: str | Path,
         runtime: ModLoaderRuntimeContract | None = None,
         operation_guard: Callable[[str], None] | None = None,
-        game_running: Callable[[], bool] | None = None,
+        game_running: Callable[[], bool | None] | None = None,
         native_workspace_path: str | Path | None = None,
     ) -> None:
         self._application_root = Path(application_root).resolve()
@@ -163,7 +165,12 @@ class ModPluginLoadingService:
         directory = Path(workspace_path).expanduser().resolve()
         if directory != self._native_workspace_root:
             raise ModPluginLoadingError('Loader 기록이 이 PC 전용 실행 디렉터리와 일치하지 않습니다.')
-        if (not isinstance(managed_files, dict) or not set(managed_files).issubset({NATIVE_LOADER_PAYLOAD_RELATIVE_PATH})
+        allowed_paths = {'NTE_Capture.dll'}
+        if inspect_game_component_bundle(self._application_root).layout in HOT_PLUGIN_LAYOUTS:
+            allowed_paths.update(HOT_PLUGIN_DEPLOYMENT_PATHS.values())
+            allowed_paths.update(PERFORMANCE_DEPLOYMENT_PATHS.values())
+            allowed_paths.update(HUD_DEPLOYMENT_PATHS.values())
+        if (not isinstance(managed_files, dict) or not set(managed_files).issubset(allowed_paths)
                 or any(not isinstance(value, str) or len(value) != 64 or any(char not in '0123456789abcdef' for char in value)
                        for value in managed_files.values())):
             raise ModPluginLoadingError('Loader 실행 디렉터리 기록에 유효하지 않은 파일 또는 다이제스트가 포함되어 있습니다.')
@@ -176,11 +183,13 @@ class ModPluginLoadingService:
         """Check support before removing an owned game entry; do not stage or launch."""
         self._require_load_allowed()
         bundle = inspect_game_component_bundle(self._application_root)
-        if bundle.layout != NATIVE_PLUGIN_LAYOUT or not bundle.ready:
+        if bundle.layout not in NATIVE_PLUGIN_LAYOUTS or not bundle.ready:
             raise ModPluginLoadingError('네이티브 번들을 사용할 수 없습니다:' + '；'.join(bundle.issues))
         self._require_msvc_runtime()
         try:
             self._runtime.require_payload_load_mode('loadlibrary')
+            if bundle.layout in HOT_PLUGIN_LAYOUTS:
+                self._runtime.require_payload_kind('nte_calc_host_v1')
         except ModLoaderRuntimeError as error:
             raise ModPluginLoadingError(str(error)) from error
 
@@ -209,7 +218,7 @@ class ModPluginLoadingService:
             bundle = inspect_game_component_bundle(self._application_root)
             if not bundle.ready:
                 raise ModPluginLoadingError('；'.join(bundle.issues))
-            payload = self._native_workspace_root / NATIVE_LOADER_PAYLOAD_RELATIVE_PATH
+            payload = self._native_workspace_root / native_loader_payload_relative(self._application_root)
             return self._runtime.snapshot(payload_path=payload)
         except (EquipmentPluginDeploymentError, ModLoaderRuntimeError) as exc:
             raise ModPluginLoadingError(str(exc)) from exc
@@ -230,7 +239,7 @@ class ModPluginLoadingService:
                 raise ModPluginLoadingWaiting("공식 런처가 아직 실행 중입니다; 런처와 게임을 종료한 후 Loader를 시작하세요.")
         except (LauncherProcessProbeError, OSError) as error:
             raise ModPluginLoadingWaiting(str(error)) from error
-        payload = self._native_workspace_root / NATIVE_LOADER_PAYLOAD_RELATIVE_PATH
+        payload = self._native_workspace_root / native_loader_payload_relative(self._application_root)
         current = self._runtime.snapshot(payload_path=payload)
         if current.phase not in {'running', 'stopped', 'missing_payload'}:
             raise ModPluginLoadingError(current.detail or 'Loader의 현재 상태로는 시작할 수 없습니다.')
@@ -267,7 +276,7 @@ class ModPluginLoadingService:
                                                  native_workspace=self._native_workspace) from error
         except (EquipmentPluginDeploymentError, ModLoaderRuntimeError, OSError) as error:
             raise ModPluginLoadingError(str(error)) from error
-        self._active_payload_sha256 = self._native_workspace.managed_files[NATIVE_LOADER_PAYLOAD_RELATIVE_PATH]
+        self._active_payload_sha256 = self._native_workspace.managed_files[native_loader_payload_relative(self._application_root)]
         return ModPluginLoaderStartResult(runtime, self._native_workspace_root, native_workspace=self._native_workspace)
 
     def launcher_running(self, game_executable_path: str | Path) -> bool:

@@ -1,4 +1,4 @@
-# 提供养成计算器已有材料录入、原生归档导入和扣减界面。
+# 提供养成计算器已有材料录入、同步导入和扣减界面。
 """Owned-material inputs shared by the toolbox cultivation result."""
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from src.app.theme import theme_color, themed_style
 from src.domain.progression_material_conversion import allocate_owned, lower_tier_ids
+from src.domain.cultivation_history import normalize_owned_materials
 from src.features.toolbox.cultivation_controls import disable_numeric_input_method
 from src.services.cultivation_planner_service import CultivationMaterial
 from src.ui.progression_material_card import ProgressionMaterialCard
@@ -85,6 +86,7 @@ class _OwnedMaterialCanvas(QWidget):
         self._editor.setRange(0, 99_999_999)
         disable_numeric_input_method(self._editor)
         self._editor.valueChanged.connect(self._quantity_edited)
+        self._editor.lineEdit().textEdited.connect(self._manual_text_edited)
         self._editor.advance_requested.connect(self._advance_selection)
         self._editor.hide()
         self.setFixedHeight(0)
@@ -252,6 +254,12 @@ class _OwnedMaterialCanvas(QWidget):
         self.quantity_changed.emit(self._selected_id)
         self.update()
 
+    def _manual_text_edited(self, _text: str) -> None:
+        """输入与显示值相同的零仍是明确手工覆盖，单纯聚焦不算填写。"""
+        if not self._updating and self._selected_id is not None:
+            self._owned[self._selected_id] = self._editor.value()
+            self.quantity_changed.emit(self._selected_id)
+
     def _advance_selection(self, step: int) -> None:
         if not self._materials or self._selected_id is None:
             return
@@ -306,6 +314,8 @@ class CultivationOwnedMaterials(QFrame):
             "border:1px solid #30363d;border-radius:9px;}"
         ))
         root = QVBoxLayout(self)
+        self._root = root
+        self._status_label: QLabel | None = None
         root.setContentsMargins(14, 10, 14, 12)
         root.setSpacing(8)
         header = QHBoxLayout()
@@ -314,12 +324,12 @@ class CultivationOwnedMaterials(QFrame):
             "color:#c9d1d9;font-size:14px;font-weight:800"
         ))
         header.addWidget(title)
-        header.addWidget(QLabel("재료 카드를 클릭해 보유 수량을 입력한 후 다시 계산하세요", self))
+        header.addWidget(QLabel("재료 카드를 클릭해 보유 수량을 입력한 후 계산을 누르세요", self))
         header.addStretch(1)
         self._import_button = QPushButton("재료 동기화", self)
         self._import_button.setObjectName("cultivationOwnedImport")
         self._import_button.setEnabled(False)
-        self._import_button.setToolTip("현재 계정의 최근 네이티브 아이템 아카이브를 읽습니다; 패킷 캡처 가방은 아직 재료 수량을 제공하지 않습니다.")
+        self._import_button.setToolTip("네이티브 모드는 현재 계정의 아카이브를 읽고, 저위험 모드는 계정에 저장된 안정 패킷 캡처 재료 관측값을 읽습니다(동기화를 중지한 후에도 사용 가능). 관측되지 않은 항목의 수량은 알 수 없습니다.")
         self._import_button.clicked.connect(lambda _checked=False: self.import_requested.emit())
         header.addWidget(self._import_button)
         clear = QPushButton("비우기", self)
@@ -331,6 +341,7 @@ class CultivationOwnedMaterials(QFrame):
         self._canvas = _OwnedMaterialCanvas(icon_lookup, self)
         self._owned_cache: dict[str, int] = {}
         self._manual_overrides: set[str] = set()
+        self._history_sources: dict[str, tuple[str, str | None]] = {}
         self._canvas.quantity_changed.connect(self._quantity_changed)
         self._canvas.layout_changed.connect(self.layout_changed)
         root.addWidget(self._canvas)
@@ -343,16 +354,35 @@ class CultivationOwnedMaterials(QFrame):
 
     def set_import_status(self, message: str) -> None:
         self._import_button.setToolTip(message)
+        if self._status_label is None:
+            label = QLabel(self)
+            label.setObjectName("cultivationOwnedImportStatus")
+            label.setWordWrap(True)
+            label.setStyleSheet(themed_style("color:#8b949e;font-size:12px;"))
+            self._root.insertWidget(1, label)
+            self._status_label = label
+        self._status_label.setText(message)
+        self._status_label.show()
 
-    def apply_import(self, quantities: Mapping[str, int]) -> int:
+    def apply_import(
+        self, quantities: Mapping[str, int], *, source: str = "native", saved_at_utc: str | None = None,
+    ) -> int:
         """Overlay observed entries only; manual edits and absent IDs remain unchanged."""
 
+        validated = normalize_owned_materials([
+            {"item_id": item_id, "quantity": amount, "manual_override": False,
+             "source": source, "observed_at_utc": saved_at_utc}
+            for item_id, amount in quantities.items()
+        ])
         changed = 0
-        for item_id, amount in quantities.items():
+        for item in validated:
+            item_id, amount = item["item_id"], item["quantity"]
             if item_id in self._manual_overrides:
                 continue
-            if self._owned_cache.get(item_id) != amount:
+            if (self._owned_cache.get(item_id) != amount
+                    or self._history_sources.get(item_id) != (source, saved_at_utc)):
                 self._owned_cache[item_id] = amount
+                self._history_sources[item_id] = (source, saved_at_utc)
                 changed += 1
         if changed:
             self._canvas.refresh_quantities(self._owned_cache)
@@ -362,18 +392,39 @@ class CultivationOwnedMaterials(QFrame):
     def clear_quantities(self) -> None:
         """Clear only the draft quantities, including currently hidden materials."""
 
-        changed = any(self._owned_cache.values())
+        changed = bool(self._history_sources) or any(self._owned_cache.values())
         self._owned_cache.clear()
         self._manual_overrides.clear()
+        self._history_sources.clear()
         self._canvas.clear_quantities()
         self._owned_cache.update(self._canvas.quantities())
-        self.set_import_status("보유 재료 초안을 비웠습니다; 계정의 네이티브 아카이브는 변경되지 않습니다.")
+        self.set_import_status("보유 재료 초안을 비웠습니다; 계정에 저장된 동기화 기록은 변경되지 않습니다.")
         if changed:
             self.quantities_changed.emit()
 
     def _quantity_changed(self, item_id: str) -> None:
         self._owned_cache.update(self._canvas.quantities())
         self._manual_overrides.add(item_id)
+        self._history_sources[item_id] = ("manual", None)
+        self.quantities_changed.emit()
+
+    def export_history_materials(self) -> list[dict[str, object]]:
+        """只保存已观测或明确填写的数量，画布默认零不伪装成账号数据。"""
+        return [{"item_id": item_id, "quantity": self._owned_cache[item_id],
+                 "manual_override": item_id in self._manual_overrides,
+                 "source": source, "observed_at_utc": observed_at}
+                for item_id, (source, observed_at) in sorted(self._history_sources.items())]
+
+    def restore_history_materials(self, values: object) -> None:
+        """先完整验证后替换；数量与覆盖标记一起恢复，不触发导入。"""
+        normalized = normalize_owned_materials(values)
+        quantities = {item["item_id"]: item["quantity"] for item in normalized}
+        overrides = {item["item_id"] for item in normalized if item["manual_override"]}
+        sources = {item["item_id"]: (item["source"], item["observed_at_utc"]) for item in normalized}
+        self._owned_cache = quantities
+        self._manual_overrides = overrides
+        self._history_sources = sources
+        self._canvas.refresh_quantities(quantities)
         self.quantities_changed.emit()
 
     def select_material(self, item_id: str) -> bool:
@@ -395,8 +446,11 @@ class CultivationOwnedMaterials(QFrame):
     def clear_materials(self) -> None:
         self._owned_cache.clear()
         self._manual_overrides.clear()
+        self._history_sources.clear()
         self._canvas.set_materials(())
-        self.set_import_status("네이티브 재료는 먼저 네이티브 가방 동기화를 완료해야 합니다; 관측되지 않은 재료는 수동 입력값을 유지합니다.")
+        self._import_button.setToolTip("동기화 후에는 관측된 재료만 업데이트되며, 관측되지 않은 항목은 수동 입력값을 유지합니다.")
+        if self._status_label is not None:
+            self._status_label.hide()
         self.layout_changed.emit()
 
 

@@ -6,12 +6,46 @@ from dataclasses import dataclass, field
 import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QPlainTextEdit, QSizePolicy
 
 from src.features.official_role.dependencies import OfficialRoleDependencies
 from src.integrations.operation_guard import require_operation
 from src.services.official_role_profile_service import OfficialRoleProfileService
 from src.services.inventory_capture_wait import InventorySyncCancelled
+
+
+class RoleSyncResultText(QPlainTextEdit):
+    """同步结果随实际换行收缩；较长诊断保留有界滚动和复制。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setAccessibleName("캐릭터 동기화 결과")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._fitting = False
+        self.document().documentLayout().documentSizeChanged.connect(self._fit_content)
+        self.textChanged.connect(self._fit_content)
+        self._fit_content()
+
+    def _fit_content(self, *_args) -> None:
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            document = self.document()
+            block, lines = document.begin(), 0
+            while block.isValid():
+                lines += max(1, block.layout().lineCount())
+                block = block.next()
+            height = int(max(1, lines) * self.fontMetrics().lineSpacing()
+                         + 2 * document.documentMargin() + 2 * self.frameWidth())
+            self.setFixedHeight(min(110, height))
+        finally:
+            self._fitting = False
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_content()
 
 
 @dataclass(eq=False)

@@ -1,40 +1,66 @@
 # NTE Drive Calc 한국어 패치
 
-[NTE Drive Calc](https://github.com/hxwd94666/NTE-Drive-Calc) (异环 드라이브 계산기)를 한국어로 번역한 패치입니다.
+[NTE Drive Calc](https://github.com/hxwd94666/NTE-Drive-Calculator) (异环 드라이브 계산기)를 한국어로 번역한 패치입니다.
 원작자의 허락을 받고 배포합니다.
+
+현재 버전: **2.3.1** (공식 2.3.1 전용, 릴리스 `v2.3.1-ko`)
 
 ## 설치
 
-1. 공식 프로그램 **2.3.0을 먼저 설치**하세요. 이 패치에는 원본 프로그램이 들어 있지 않습니다.
-   → https://github.com/hxwd94666/NTE-Drive-Calc
-2. [Releases](../../releases)에서 `NTE_Drive_Calc_..._KO_Patch_Setup.exe`를 받아 **더블클릭**합니다.
+1. 공식 프로그램 **2.3.1을 먼저 설치**하세요. 이 패치에는 원본 프로그램이 들어 있지 않습니다.
+   → https://github.com/hxwd94666/NTE-Drive-Calculator/releases
+2. [Releases](../../releases)에서 `NTE_Drive_Calc_2.3.1_KO_Patch_Setup.exe`를 받아 **더블클릭**합니다.
 3. UAC 창에서 "예"를 누르면 끝입니다. 설치 폴더는 자동으로 찾고, 프로그램이 켜져 있으면 알아서 닫습니다.
+   비표준 위치에 설치했다면 `NTE_Drive_Calc_2.3.1_KO_Patch_Setup.exe /TARGET="D:\내폴더\NTE Drive Calc"`
 
 원본 실행 파일은 `NTE_Drive_Calc.original.exe`로, 원본 튜토리얼 이미지는 `guide_zh` 폴더로 자동 백업됩니다.
 
 **되돌리려면** 설치 파일을 다시 실행하세요. "다시 설치 / 원본으로 복원 / 닫기"를 물어봅니다.
 
+### 2.3.0 한글 패치를 쓰던 분
+
+2.3.0(원본이든 한글 패치든)이 설치된 상태에서는 설치 파일이 **아무것도 바꾸지 않고 중단**합니다.
+프로그램을 공식 2.3.1로 먼저 업데이트한 뒤(화면이 중국어로 돌아가는 건 정상) 설치 파일을 실행하세요.
+2.3.0 때 만들어진 백업은 설치 중에 2.3.1 원본으로 자동 교체되어, 복원도 2.3.1 원본으로 됩니다.
+
 ## 번역 범위
 
 - 화면 문자열 약 10,000개
 - 캐릭터·세트·아크·속성·스킬·몬스터 이름과 각성·스킬·세트 효과 설명문
-- **전투 리포트 전체** — 히트별 로그, 툴팁, 타임라인, 드라이브 서브 스탯
+- **전투 리포트** — 히트별 로그, 툴팁, 타임라인, 드라이브 서브 스탯 (분석 컴포넌트가 보내는 깊은 근거 문장 일부는
+  아직 중국어 — 아래 「주의」 참고)
 - "사용 방법" 튜토리얼 이미지 7장 한국어판
 - 검색창에서 **한글·초성 검색** 지원 (중국어·병음도 그대로 됩니다)
 
-스킬·서브 스킬·각성·공명 이름은 **한국 서버 공식 명칭**을 사용했습니다. 한국 서버에 아직 출시되지
-않은 콘텐츠는 임시 번역이며, 출시되는 대로 공식 명칭으로 교체합니다.
+스킬·서브 스킬·각성·공명 이름은 **한국 서버 공식 명칭**을 사용했습니다. 한국 서버에 공식 명칭이 없는
+「」 용어(「噤」「詈」 등)는 추측하지 않고 중국어 원문 그대로 두었고, 아직 출시되지 않은 콘텐츠의 이름
+(궤외 시즌 순환선·시즌 버프 등)은 임시 번역입니다. 공식 명칭이 나오는 대로 교체합니다.
+
+## 게임 폴더 보호
+
+계산기는 게임 폴더에 동기화·플러그인용 컴포넌트(`d3d12.dll` 등)를 배포하고 정리합니다. 이 패치는 그때
+**계산기가 배포한 파일만** 덮어쓰고 지웁니다(공식 빌드의 해시나 배포 기록의 해시로 확인). ReShade의
+`d3d12.dll`처럼 다른 프로그램의 파일은 그대로 두고, 배포를 멈춘 뒤 어떤 파일인지 알려 줍니다.
 
 ## 주의
 
 - 게임 클라이언트 언어는 **简体中文**로 두셔야 스캔/감정(OCR)이 동작합니다. 프로그램이 중국어
   텍스트를 인식하는 방식이라 그렇습니다.
 - 프로그램이 **자동 업데이트되면 패치가 사라집니다.** 새 버전용 패치가 따로 필요합니다.
-- 이 패치는 특정 버전 전용입니다. 다른 버전에서는 설치가 중단됩니다.
+- 이 패치는 특정 버전 전용입니다. 다른 버전이나 다국어판 같은 수정본에서는 아무것도 바꾸지 않고 설치가 중단됩니다.
+- 전투 리포트의 깊은 근거 문장 일부(분석 컴포넌트, 약 310개 구절)는 2.3.0 때부터 중국어로 남아 있습니다.
+  2.3.1에서 새로 생긴 분석 문장 83개는 모두 한국어로 표시됩니다.
 
 ## 파일 확인
 
-각 버전의 SHA256은 [Releases](../../releases) 노트에 있습니다. 설치 후 아래로 직접 확인하실 수 있습니다.
+현재 버전(2.3.1)의 SHA256입니다. 다른 버전은 [Releases](../../releases) 노트에 있습니다.
+
+```
+5b3e9cdd33e55560680224f23b62c9d202df74f89b5d6bb73ee777f5976b33f5  패치된 NTE_Drive_Calc.exe
+5b8fa8d2b7580bacd494c0f71e76d7b05cf1bee4f9b94bb945993a2e1c69e8c3  공식 2.3.1 원본 NTE_Drive_Calc.exe
+```
+
+설치 후 아래로 직접 확인하실 수 있습니다.
 
 ```
 certutil -hashfile "C:\Program Files\NTE Drive Calc\NTE_Drive_Calc.exe" SHA256
@@ -54,16 +80,18 @@ NTE Drive Calc는 **AGPL-3.0**으로 배포되는 프로그램이며, 이 패치
 
 ## 中文 / English
 
-**这是什么** — [NTE Drive Calc](https://github.com/hxwd94666/NTE-Drive-Calc) 的韩文本地化补丁，经原作者同意后发布。
-不是 i18n 框架，而是针对特定发行版本的两层本地化：构建期替换 `src/` 里的中文字面量并只替换
+**这是什么** — [NTE Drive Calc](https://github.com/hxwd94666/NTE-Drive-Calculator) 的韩文本地化补丁，经原作者同意后发布。
+不是 i18n 框架，而是针对特定发行版本（当前为 2.3.1）的两层本地化：构建期替换 `src/` 里的中文字面量并只替换
 PyInstaller PYZ 中的 `src.*` 模块（其余归档条目与原版逐字节相同），运行期再由一个显示层处理
 源码替换够不到的部分（数据库 `*_zh` 值、C++ 侧构造的标签、以及原生分析组件返回的战报文本）。
+此外，部署/清理游戏目录组件时只覆盖或删除本程序部署过的文件（按哈希判断），不会动 ReShade 等其他程序的同名文件。
 
 **A Korean localization patch** for NTE Drive Calc, published with the author's permission. Not an
-i18n framework - a two-layer localization of one specific release: build-time replacement of the
+i18n framework - a two-layer localization of one specific release (currently 2.3.1): build-time replacement of the
 Chinese literals in `src/`, repacking only the `src.*` modules inside the PyInstaller PYZ (every
 other archive entry stays byte-identical), plus a runtime display layer for the strings that source
-rewriting cannot reach.
+rewriting cannot reach. When deploying or cleaning up components in the game folder, the patch only overwrites
+or deletes files this app deployed (checked by hash), so a same-named file from another program such as ReShade is left alone.
 
 `src/` in this repository is the corresponding source for the published binary, as required by
 AGPL-3.0. See [SOURCE_OFFER.md](SOURCE_OFFER.md).

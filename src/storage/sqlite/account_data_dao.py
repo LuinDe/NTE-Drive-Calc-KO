@@ -48,13 +48,35 @@ class AccountDataDaoMixin(UserDataDaoMixinHost):
         return copies
 
     def replace_application_setting_copy(
-        self, setting_key: str, value: Mapping[str, Any]
+        self, setting_key: str, value: Mapping[str, Any], *,
+        expected_loadout_plans: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         key = str(setting_key).strip()
         if not key:
             raise UserDataValidationError("setting_key는 비워 둘 수 없습니다")
         if not isinstance(value, Mapping):
             raise UserDataValidationError("계정 설정 사본은 객체여야 합니다")
+        connection = self._db()
+        try:
+            if expected_loadout_plans:
+                connection.execute("BEGIN IMMEDIATE")
+                for expected in expected_loadout_plans:
+                    character_id = _integer(expected["character_id"], "character_id", minimum=1)
+                    row = self._one(
+                        "SELECT character_id, current_plan_id, is_archived FROM role_loadout_slot WHERE slot_id = ?",
+                        (_integer(expected["slot_id"], "slot_id", minimum=1),),
+                    )
+                    if (row is None or row["is_archived"]
+                            or row["character_id"] != character_id
+                            or row["current_plan_id"] != expected["plan_id"]):
+                        raise UserDataValidationError("선택한 장비 세팅이 변경되었습니다. 되감기 추천을 닫았다가 다시 연 뒤 생성하세요.")
+            self._write_application_setting(key, value)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def _write_application_setting(self, key: str, value: Mapping[str, Any]) -> None:
         self._db().execute(
             """
             INSERT INTO application_setting_copy(setting_key, value_json, updated_at_utc)
@@ -65,7 +87,6 @@ class AccountDataDaoMixin(UserDataDaoMixinHost):
             """,
             (key, _json(dict(value)), _utc_now()),
         )
-        self._db().commit()
 
     def delete_application_setting_copy(self, setting_key: str) -> None:
         self._db().execute(

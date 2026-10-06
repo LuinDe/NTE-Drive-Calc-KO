@@ -9,4 +9,6 @@ from PySide6.QtWidgets import QTextEdit
 class PlainTextOnlyTextEdit(QTextEdit):
     def insertFromMimeData(self, source):
         if source.hasText():
-            self.insertPlainText(source.text())
+            cursor = self.textCursor()   # not insertPlainText: i18n_display would translate what the parser reads
+            cursor.insertText(source.text())
+            self.setTextCursor(cursor)

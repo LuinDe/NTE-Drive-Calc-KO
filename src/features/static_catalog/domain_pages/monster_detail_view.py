@@ -385,8 +385,8 @@ class MonsterDetailView(QWidget):
             resistance_grid.addWidget(card, index // columns, index % columns)
         layout.addLayout(resistance_grid)
         penetration = QLabel(
-            f"방어 무시 {_value_text(values.get('防御忽略'))}  ·  "
-            f"공격 티어 {_value_text(values.get('攻击档'))}",
+            f"방어 무시 {_value_text(values.get('방어 무시'))}  ·  "
+            f"공격 티어 {_value_text(values.get('공격 티어'))}",
             frame,
         )
         penetration.setWordWrap(True)
@@ -444,7 +444,7 @@ def _display_title(detail: CatalogDetail, context: MonsterContext | None) -> str
 
 
 def _profile_title(title: str) -> str:
-    return title.replace("等价公式", "").replace("公式", "").strip(" ·") or "전투 프로필"
+    return title.replace("등가 공식 ", "").replace("공식 ", "").replace("等价公式", "").replace("公式", "").strip(" ·") or "전투 프로필"
 
 
 def _profile_level(section: CatalogSection) -> float:
@@ -471,7 +471,7 @@ def _profile_kind(section: CatalogSection) -> str:
 def _matching_profile_index(
     sections: tuple[CatalogSection, ...], context_level: str,
 ) -> int:
-    match = re.search(r"(?:等级|Lv\.?)[^0-9]*(\d+(?:\.\d+)?)", context_level)
+    match = re.search(r"(?:等级|레벨|Lv\.?)[^0-9]*(\d+(?:\.\d+)?)", context_level)
     if match is None:
         return 0
     wanted = float(match.group(1))
@@ -486,7 +486,7 @@ def _matching_profile_index(
 
 def _join_profile(values: dict[str, object], *labels: str) -> str:
     return "  ·  ".join(
-        f"{label.removeprefix('生命').removeprefix('防御').removeprefix('倾陷') or label} "
+        f"{label.removeprefix('HP ').removeprefix('방어 ').removeprefix('브레이크 ').removeprefix('붕괴 ') or label} "
         f"{_value_text(values.get(label))}" for label in labels
     )
 

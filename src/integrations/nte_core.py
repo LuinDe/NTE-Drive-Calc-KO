@@ -33,6 +33,7 @@ from src.integrations.nte_core_protocol import (
     NteCoreNotFoundError,
     NteCoreProcessError,
     NteCoreProtocolError,
+    NteCoreRequestContext,
     NteCoreRpcError,
     NteCoreTimeoutError,
     group_inventory_items_by_character,
@@ -195,6 +196,7 @@ class NteCoreClient(NteCoreBattleQueryMixin):
         self._threads: list[threading.Thread] = []
         self.hello_result: JsonObject | None = None
         self.executable_sha256: str | None = None
+        self.executable_path: str | None = None
 
     @property
     def process_id(self) -> int | None:
@@ -233,6 +235,7 @@ class NteCoreClient(NteCoreBattleQueryMixin):
         try:
             command = self._serve_command()
             if self._base_command is None:
+                self.executable_path = str(Path(command[0]).resolve())
                 with Path(command[0]).open("rb") as executable_stream:
                     self.executable_sha256 = hashlib.file_digest(
                         executable_stream,
@@ -399,6 +402,8 @@ class NteCoreClient(NteCoreBattleQueryMixin):
             raise self._process_error("nte-core is not running")
 
         request_timeout = self.timeout if timeout is None else timeout
+        context = NteCoreRequestContext(method, self.executable_path, self.executable_sha256,
+                                        self.hello_result is not None)
         if request_timeout <= 0:
             raise ValueError("timeout must be greater than zero")
         with self._id_lock:
@@ -422,17 +427,23 @@ class NteCoreClient(NteCoreBattleQueryMixin):
                                           check_cancelled=check_cancelled)
         except (BrokenPipeError, OSError) as exc:
             raise self._process_error(f"could not write nte-core request: {exc}") from exc
+        except NteCoreError as exc:
+            exc.request_context = context
+            raise
         finally:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
 
         if isinstance(response, BaseException):
+            # Reader failures may be shared by concurrent requests; do not mutate them.
             raise response
         if "error" in response:
             error = response["error"]
             if not isinstance(error, Mapping):
                 raise NteCoreProtocolError("JSON-RPC error must be an object")
-            raise NteCoreRpcError(error)
+            failure = NteCoreRpcError(error)
+            failure.request_context = context
+            raise failure
         if "result" not in response:
             raise NteCoreProtocolError("JSON-RPC response has neither result nor error")
         return response["result"]

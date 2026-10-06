@@ -4,15 +4,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from typing import Any
 
 from src.integrations.nte_core import equipment_request_failure_kind
 from src.integrations.operation_guard import OperationGuard, require_operation
 from src.observability.context import OperationContext
-from src.observability.operation import operation_scope
+from src.observability.operation import log_event
+from src.services.equipment_apply_recovery import EquipmentApplyRecovery, RecoveryStopped
+from src.services.equipment_apply_projection import project_dispatched_loadouts
 from src.services.bulk_equipment_apply_postcheck import postcheck_and_repair
-from src.services.equipment_apply_service import EquipmentApplyService
+from src.services.equipment_apply_service import EquipmentApplyError, EquipmentApplyService
 from src.services.loadout_slot_selection_service import LoadoutSlotSelectionService
 from src.storage.sqlite.user_data_dao import UserDataDao
 from src.utils.logger import logger
@@ -66,6 +71,8 @@ class BulkEquipmentApplyService:
         apply_service_factory=EquipmentApplyService,
         operation_context: OperationContext | None = None,
         operation_guard: OperationGuard | None = None,
+        cancel_event: Event | None = None,
+        check_current: Callable[[], None] | None = None,
     ) -> None:
         self.operation_guard = operation_guard
         self.database_path = Path(database_path)
@@ -75,6 +82,14 @@ class BulkEquipmentApplyService:
         self.operation_context = operation_context or OperationContext.create(
             "equipment_apply"
         )
+        self.cancel_event = cancel_event or Event()
+        self.check_current = check_current or (lambda: None)
+
+    def _check(self):
+        self.check_current()
+        require_operation(self.operation_guard, "native_equipment")
+        if self.cancel_event.is_set():
+            raise CancelledError("장착 작업이 취소되었습니다")
 
     def run(
         self,
@@ -85,19 +100,15 @@ class BulkEquipmentApplyService:
         job_id: int | None = None,
         progress_callback: ProgressCallback = None,
     ) -> dict[str, Any]:
-        require_operation(self.operation_guard, "native_equipment")
+        self._check()
         if job_id is None and bool(role_names) == bool(slot_ids):
             raise RuntimeError("고속 장착은 캐릭터 또는 명시적 장비 세팅 슬롯 중 하나만 지정해야 합니다")
         requested_count = len(slot_ids or ()) if slot_ids else len(role_names or ())
-        with operation_scope(
-            self.operation_context,
-            started_event="equipment_apply.bulk_started",
-            succeeded_event="equipment_apply.bulk_succeeded",
-            failed_event="equipment_apply.bulk_failed",
-            message="고속 장착 실행",
-            requested_role_count=requested_count,
-            resume_job_id=job_id,
-        ) as span:
+        started = monotonic()
+        log_event("INFO", "equipment_apply.bulk_started", "고속 장착 실행",
+                  self.operation_context, requested_role_count=requested_count,
+                  resume_job_id=job_id, phase="started")
+        try:
             result = self._run(
                 role_names or [],
                 slot_ids=slot_ids,
@@ -105,14 +116,22 @@ class BulkEquipmentApplyService:
                 job_id=job_id,
                 progress_callback=progress_callback,
             )
-            span.annotate(
-                job_id=result.get("job_id"),
-                applied_count=len(result.get("applied") or []),
-                unresolved_identity_count=len(result.get("identity_requests") or []),
-                preflight_error_count=len(result.get("preflight_errors") or []),
-                completed=bool(result.get("completed")),
-            )
-            return result
+        except Exception as error:
+            log_event("ERROR", "equipment_apply.bulk_failed", "고속 장착 미완료",
+                      self.operation_context, phase="failed", result="failed",
+                      error_type=type(error).__name__, duration_ms=round((monotonic() - started) * 1000, 3))
+            raise
+        failed = not result.get("completed") or bool(result.get("repair_errors") or result.get("snapshot_wait_failure"))
+        log_event("WARNING" if failed else "INFO",
+                  "equipment_apply.bulk_failed" if failed else "equipment_apply.bulk_succeeded",
+                  "고속 장착 미완료" if failed else "고속 장착 전달 완료",
+                  self.operation_context, job_id=result.get("job_id"),
+                  applied_count=len(result.get("applied") or []), completed=bool(result.get("completed")),
+                  recovery_retry_count=result.get("recovery_retry_count", 0),
+                  snapshot_recovery_count=result.get("snapshot_recovery_count", 0),
+                  failure_kind=result.get("failure_kind"), phase="failed" if failed else "succeeded",
+                  result="failed" if failed else "succeeded", duration_ms=round((monotonic() - started) * 1000, 3))
+        return result
 
     def _run(
         self,
@@ -128,6 +147,7 @@ class BulkEquipmentApplyService:
         identity_requests: list[dict[str, Any]] = []
         pinned_snapshot_id: int | None = None
         with self.dao_factory(self.database_path) as user_dao:
+            self._check()
             apply_service = self.apply_service_factory(
                 user_dao,
                 self.sync_service,
@@ -156,13 +176,25 @@ class BulkEquipmentApplyService:
                 return early
 
             stable_snapshot_id = pinned_snapshot_id or apply_service.require_stable_snapshot()
+            apply_service.execution_check = self._check
+            frozen_plans = apply_service.freeze_plans(prepared, stable_snapshot_id)
+            apply_service.validate_bulk_plans_for_fast_apply(prepared, stable_snapshot_id=stable_snapshot_id)
             frozen_inventory_uids = self._inventory_uid_pairs(user_dao, stable_snapshot_id)
+            recovery = EquipmentApplyRecovery(
+                self.sync_service, user_dao, snapshot_id=stable_snapshot_id,
+                inventory_uids=frozen_inventory_uids, operation_guard=self.operation_guard,
+                cancel_event=self.cancel_event, check_current=self.check_current,
+                operation_context=self.operation_context.with_values(job_id=job_id),
+                progress=lambda message: report_bulk_apply_progress(progress_callback,
+                    current=len(applied), total=len(prepared), message=message),
+            )
+            apply_service.recovery = recovery
             guard_token = self._begin_full_inventory_guard(
                 frozen_inventory_uids,
                 source_snapshot_id=stable_snapshot_id,
             )
             try:
-                with self.sync_service.equipment_batch():
+                with recovery.batch():
                     failure = self._execute_prepared(
                         user_dao,
                         apply_service,
@@ -173,15 +205,20 @@ class BulkEquipmentApplyService:
                         int(job_id),
                         progress_callback,
                     )
+                self.check_current()
                 projected_count = self._project_dispatched_loadouts(
                     user_dao,
                     applied,
                     snapshot_id=stable_snapshot_id,
+                    frozen_plans=frozen_plans,
                 )
                 if failure is not None:
                     failure["projected_count"] = projected_count
+                    failure["recovery_retry_count"] = recovery.short_retry_count
+                    failure["snapshot_recovery_count"] = recovery.total_sync_recoveries
                     return failure
 
+                self._check()
                 postcheck = self._postcheck_and_repair(
                     user_dao,
                     apply_service,
@@ -190,10 +227,14 @@ class BulkEquipmentApplyService:
                     stable_snapshot_id,
                     progress_callback,
                     frozen_inventory_uids=frozen_inventory_uids,
+                    observation_cursor=recovery.last_dispatch_observation_cursor,
+                    check_source=recovery.check_source,
                 )
+                self._check()
                 completed = user_dao.complete_equipment_apply_job_if_done(int(job_id))
             finally:
                 self._end_full_inventory_guard(guard_token)
+                apply_service.recovery = None
         return {
             "job_id": job_id,
             "applied": applied,
@@ -201,6 +242,8 @@ class BulkEquipmentApplyService:
             **postcheck,
             "projected_count": projected_count,
             "completed": completed,
+            "recovery_retry_count": recovery.short_retry_count,
+            "snapshot_recovery_count": recovery.total_sync_recoveries,
         }
 
     @staticmethod
@@ -212,78 +255,10 @@ class BulkEquipmentApplyService:
         )
 
     @staticmethod
-    def _project_dispatched_loadouts(
-        user_dao,
-        applied: list[dict],
-        *,
-        snapshot_id: int,
-    ) -> int:
-        """Reflect submitted loadouts in the pinned warehouse projection.
-
-        The immutable inventory membership and current snapshot pointer remain
-        untouched.  Later nte-core inventory events overwrite these requested
-        per-item states; their only purpose is verification/retry.
-        """
-
-        projector = getattr(user_dao, "apply_inventory_command_state_projection", None)
-        if not applied or not callable(projector):
-            return 0
-        rows = user_dao.list_inventory_items(snapshot_id)
-        by_uid = {
-            (int(row.get("uid_slot") or 0), int(row.get("uid_serial") or 0)): row
-            for row in rows
-        }
-        target_character_uids = {
-            (int(role["character_uid"]["slot"]), int(role["character_uid"]["serial"]))
-            for role in applied
-            if isinstance(role.get("character_uid"), dict)
-        }
-        projected: list[dict] = []
-        for row in rows:
-            character_uid = row.get("equipped_character_uid")
-            if not isinstance(character_uid, dict):
-                continue
-            pair = (int(character_uid.get("slot") or 0), int(character_uid.get("serial") or 0))
-            if pair not in target_character_uids:
-                continue
-            item = dict(row)
-            item["uid"] = {"slot": row["uid_slot"], "serial": row["uid_serial"]}
-            item.update({
-                "equipped": False,
-                "equipped_character_id": None,
-                "equipped_character_uid": None,
-                "equipped_placement": None,
-            })
-            projected.append(item)
-        for role in applied:
-            plan = user_dao.get_loadout_plan(int(role["plan_id"]))
-            if plan is None:
-                continue
-            character_uid = dict(role["character_uid"])
-            for assignment in plan.get("assignments") or ():
-                pair = (
-                    int(assignment.get("uid_slot") or 0),
-                    int(assignment.get("uid_serial") or 0),
-                )
-                row = by_uid.get(pair)
-                if row is None:
-                    continue
-                item = dict(row)
-                item["uid"] = {"slot": pair[0], "serial": pair[1]}
-                placement = None
-                if assignment.get("kind") == "module":
-                    placement = {
-                        "row": assignment.get("target_row"),
-                        "column": assignment.get("target_column"),
-                    }
-                item.update({
-                    "equipped": True,
-                    "equipped_character_id": int(role["character_id"]),
-                    "equipped_character_uid": character_uid,
-                    "equipped_placement": placement,
-                })
-                projected.append(item)
-        return int(projector(snapshot_id, projected))
+    def _project_dispatched_loadouts(user_dao, applied: list[dict], *, snapshot_id: int,
+                                   frozen_plans: dict[int, dict] | None = None) -> int:
+        return project_dispatched_loadouts(user_dao, applied, snapshot_id=snapshot_id,
+                                           frozen_plans=frozen_plans)
 
     def _begin_full_inventory_guard(
         self,
@@ -584,6 +559,7 @@ class BulkEquipmentApplyService:
             message="전체 캐릭터 장착 명령을 순서대로 전송하는 중…",
         )
         for index, role in enumerate(prepared, start=1):
+            self._check()
             role_name = role["role_name"]
             report_bulk_apply_progress(
                 progress_callback,
@@ -610,6 +586,7 @@ class BulkEquipmentApplyService:
                     role,
                     stable_snapshot_id,
                 )
+                self.check_current()
                 user_dao.mark_equipment_apply_job_item(
                     role["job_item_id"],
                     status="succeeded",
@@ -643,6 +620,17 @@ class BulkEquipmentApplyService:
                     message=(f"[{role_name}] 확인됨" if result.verified else f"[{role_name}] 명령 전송됨"),
                 )
             except Exception as exc:
+                self.check_current()
+                kind = ("cancelled" if isinstance(exc, CancelledError) else
+                        "recovery_exhausted" if isinstance(exc, RecoveryStopped) else
+                        equipment_request_failure_kind(exc))
+                log_event("WARNING", "equipment_apply.role_failed", "캐릭터 장착 중지됨",
+                          self.operation_context, job_id=job_id, plan_id=role["plan_id"],
+                          character_id=role["character_id"], failure_kind=kind,
+                          stop_reason=getattr(exc, "reason", kind),
+                          step=getattr(exc, "step", "command"),
+                          module_index=getattr(exc, "module_index", 0),
+                          error_code=getattr(exc, "code", None), domain_code=getattr(exc, "domain_code", None))
                 user_dao.mark_equipment_apply_job_item(
                     role["job_item_id"],
                     status="failed",
@@ -660,7 +648,8 @@ class BulkEquipmentApplyService:
                     "identity_requests": identity_requests,
                     "failed_role": role_name,
                     "error": str(exc),
-                    "failure_kind": equipment_request_failure_kind(exc),
+                    "failure_kind": kind,
+                    "stop_reason": getattr(exc, "reason", kind),
                     "completed": False,
                 }
         return None
@@ -696,7 +685,10 @@ class BulkEquipmentApplyService:
                 break
             except Exception as exc:
                 last_error = exc
-                if equipment_request_failure_kind(exc) in {"outcome_unknown", "core_request_timeout"}:
+                # A different protagonist may only resolve a local preflight
+                # failure, never an attempted command or transport failure.
+                if (not isinstance(exc, EquipmentApplyError)
+                    or getattr(apply_service, "dispatch_started", False)):
                     raise
                 if index + 1 >= len(targets):
                     raise
@@ -718,6 +710,8 @@ class BulkEquipmentApplyService:
         progress_callback: ProgressCallback,
         *,
         frozen_inventory_uids: frozenset[tuple[int, int]] | None = None,
+        observation_cursor: int | None = None,
+        check_source: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         return postcheck_and_repair(
             self.sync_service,
@@ -729,6 +723,9 @@ class BulkEquipmentApplyService:
             frozen_inventory_uids=frozen_inventory_uids or frozenset(),
             timeout=_snapshot_timeout(user_dao),
             max_attempts=MAX_EQUIPMENT_APPLY_ATTEMPTS,
+            check_cancelled=self._check,
+            observation_cursor=observation_cursor,
+            check_source=check_source,
             report_progress=lambda current, total, message, show_progress_bar: report_bulk_apply_progress(
                 progress_callback,
                 current=current,

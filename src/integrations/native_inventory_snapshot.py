@@ -64,6 +64,7 @@ def read_native_projection(call: Callable[..., dict[str, Any]], check: Callable[
     projection_missing = set()
     stat_provenance = None
     result_rows, characters, references = [], None, None
+    equipped_pages = []
     offset = total_bytes = 0
     while True:
         check()
@@ -112,6 +113,8 @@ def read_native_projection(call: Callable[..., dict[str, Any]], check: Callable[
             if references is not None and references != page_references:
                 raise NteCoreProtocolError("네이티브 가방 페이지네이션의 캐릭터 장비 참조가 변경되었습니다.")
             references = deepcopy(page_references)
+        if domain == "character":
+            equipped_pages.append(deepcopy(page.get("battleEquipment")))
         result_rows.extend(deepcopy(rows))
         offset = end
         if next_offset is None:
@@ -134,7 +137,7 @@ def read_native_projection(call: Callable[..., dict[str, Any]], check: Callable[
             raise NteCoreProtocolError("네이티브 캐릭터 상태 페이지네이션에 중복 캐릭터가 있어 이번 업데이트를 폐기했습니다.")
     return {**metadata, field: result_rows, "projectionMissing": sorted(projection_missing),
             **({"characters": characters, "projectionComplete": True, "statProvenance": stat_provenance,
-                                              "referencedItemUids": references} if domain == "inventory" else {})}
+                                              "referencedItemUids": references} if domain == "inventory" else {"battleEquipment": _equipped_subset(equipped_pages)})}
 
 
 def _formal_uid(value):
@@ -144,3 +147,30 @@ def _formal_uid(value):
     if any(type(part) is not int or not 0 < part < 4294967295 for part in parts):
         raise NteCoreProtocolError("네이티브 장비 인스턴스 식별 정보가 정식 인터페이스 범위에 없습니다.")
     return parts
+
+
+def _equipped_subset(pages):
+    """Validate the versioned Core subset; never route it to inventory storage."""
+    unavailable = {"schemaVersion": 1, "scope": "character_equipped_only", "complete": False}
+    if any(not isinstance(page, dict) or page.get("complete") is not True for page in pages):
+        return unavailable
+    items, characters, provenance = [], [], None
+    for page in pages:
+        if page.get("schemaVersion") != 1 or page.get("scope") != "character_equipped_only":
+            raise NteCoreProtocolError("전투 리포트 장착 아이템의 출처 범위가 유효하지 않습니다.")
+        if not isinstance(page.get("items"), list) or not isinstance(page.get("characters"), list):
+            raise NteCoreProtocolError("전투 리포트 장착 아이템의 투영이 불완전합니다.")
+        if provenance is not None and provenance != page.get("statProvenance"):
+            raise NteCoreProtocolError("전투 리포트 장착 아이템의 스탯 출처가 변경되었습니다.")
+        provenance = page.get("statProvenance")
+        items.extend(page["items"])
+        characters.extend(page["characters"])
+    if any(not isinstance(row, dict) for row in [*items, *characters]):
+        raise NteCoreProtocolError("전투 리포트 장착 아이템 형식이 유효하지 않습니다.")
+    ids = [row.get("character_id") for row in characters]
+    if any(type(cid) is not int or cid <= 0 for cid in ids) or len(ids) != len(set(ids)):
+        raise NteCoreProtocolError("전투 리포트 장착 아이템에 중복되거나 유효하지 않은 캐릭터가 포함되어 있습니다.")
+    uids = [_formal_uid(row.get("uid")) for row in items]
+    if len(uids) != len(set(uids)) or any(row.get("equipped_character_id") not in ids for row in items):
+        raise NteCoreProtocolError("전투 리포트 장착 아이템의 인스턴스 또는 귀속이 충돌합니다.")
+    return {**unavailable, "complete": True, "items": items, "characters": characters, "statProvenance": provenance}

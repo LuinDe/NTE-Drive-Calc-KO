@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 import time
 from typing import Any
 
 from src.integrations.nte_core import equipment_request_failure_kind
+from src.services.equipment_apply_recovery import RecoveryStopped
 from src.utils.logger import logger
 
 
@@ -26,6 +28,9 @@ def postcheck_and_repair(
     timeout: float,
     max_attempts: int,
     report_progress: ProgressReporter,
+    check_cancelled: Callable[[], None] | None = None,
+    observation_cursor: int | None = None,
+    check_source: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Prefer a guarded complete snapshot; retain residual checks as fallback.
 
@@ -57,7 +62,12 @@ def postcheck_and_repair(
 
     after_snapshot_id = stable_snapshot_id
     for attempt in range(1, max_attempts + 1):
+        if check_cancelled is not None:
+            check_cancelled()
         if attempt > 1:
+            cursor_reader = getattr(sync_service, "inventory_observation_cursor", None)
+            if callable(cursor_reader):
+                observation_cursor = cursor_reader()
             pending = dispatch_retry_attempt(
                 sync_service,
                 apply_service,
@@ -65,7 +75,12 @@ def postcheck_and_repair(
                 after_snapshot_id,
                 attempt,
                 output["repair_errors"],
+                check_cancelled=check_cancelled,
+                user_dao=user_dao,
             )
+            if output["repair_errors"]:
+                output["snapshot_wait_failure"] = dict(output["repair_errors"][-1])
+                return output
             if not pending:
                 return output
 
@@ -76,6 +91,7 @@ def postcheck_and_repair(
             True,
         )
         round_deadline = time.monotonic() + timeout
+        observation: dict = {}
         full_snapshot_id = (
             wait_for_guarded_full_snapshot(
                 sync_service,
@@ -83,11 +99,16 @@ def postcheck_and_repair(
                 after_snapshot_id=after_snapshot_id,
                 frozen_inventory_uids=frozen_inventory_uids,
                 timeout=max(0.0, round_deadline - time.monotonic()),
+                check_cancelled=check_cancelled,
+                after_cursor=observation_cursor,
+                observation_sink=observation,
             )
             if frozen_inventory_uids
             else None
         )
         if full_snapshot_id is not None:
+            if check_source is not None:
+                check_source()
             after_snapshot_id = full_snapshot_id
             if output["postcheck_snapshot_id"] is None:
                 output["postcheck_snapshot_id"] = full_snapshot_id
@@ -103,10 +124,18 @@ def postcheck_and_repair(
                 apply_service,
                 pending,
                 snapshot_id=full_snapshot_id,
+                check_cancelled=check_cancelled,
+                observed_items=observation.get("items"),
             )
             output["full_snapshot_verification_count"] = sum(
                 bool(row.get("full_snapshot_verified")) for row in applied
             )
+            if any(row.get("full_snapshot_verification_error") for row in pending):
+                output["snapshot_wait_failure"] = {
+                    "attempt": attempt, "kind": "snapshot_error",
+                    "error": "전체 가방 재검토 필드가 불완전하여 후속 장착 요청을 중지했습니다.",
+                }
+                return output
             if not pending:
                 logger.info("고속 장착 완전 스냅샷 재검토 통과")
                 return output
@@ -116,6 +145,8 @@ def postcheck_and_repair(
             continue
 
         output["full_snapshot_wait_timed_out"] = True
+        if check_source is not None:
+            check_source()
         logger.info("고속 장착 {}회차에 완전한 가방 스냅샷을 받지 못해 부분 이벤트 대체 재검토로 전환합니다", attempt)
         pending = verify_scoped_equipment_events(
             sync_service,
@@ -123,6 +154,7 @@ def postcheck_and_repair(
             apply_service,
             pending,
             timeout=max(0.0, round_deadline - time.monotonic()),
+            check_cancelled=check_cancelled,
         )
         output["scoped_verification_count"] = sum(
             bool(row.get("scoped_verified")) for row in applied
@@ -152,21 +184,34 @@ def wait_for_guarded_full_snapshot(
     after_snapshot_id: int,
     frozen_inventory_uids: frozenset[tuple[int, int]],
     timeout: float,
+    check_cancelled: Callable[[], None] | None = None,
+    after_cursor: int | None = None,
+    observation_sink: dict | None = None,
 ) -> int | None:
     """Wait for a native complete snapshot with the original full UID set."""
 
     waiter = getattr(sync_service, "wait_for_snapshot", None)
     if not callable(waiter):
         return None
-    try:
-        state = waiter(
-            after_snapshot_id=after_snapshot_id,
-            timeout=max(0.0, timeout),
-        )
-    except TimeoutError:
-        return None
+    observation_waiter = getattr(sync_service, "wait_for_inventory_observation", None)
+    observed = after_cursor is not None and callable(observation_waiter)
+    deadline = time.monotonic() + timeout
+    while True:
+        if check_cancelled is not None:
+            check_cancelled()
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            wait_seconds = min(0.25, remaining) if check_cancelled is not None else remaining
+            state = (observation_waiter(after_cursor=after_cursor, timeout=wait_seconds) if observed else
+                     waiter(after_snapshot_id=after_snapshot_id, timeout=wait_seconds))
+            break
+        except TimeoutError:
+            if check_cancelled is None or time.monotonic() >= deadline:
+                return None
     snapshot_id = getattr(state, "last_snapshot_id", None)
-    if not isinstance(snapshot_id, int) or snapshot_id <= after_snapshot_id:
+    if (not isinstance(snapshot_id, int) or snapshot_id < after_snapshot_id
+        or (not observed and snapshot_id == after_snapshot_id)
+        or (observed and state.cursor <= after_cursor)):
         return None
     summary = user_dao.inventory_snapshot_summary(snapshot_id)
     if (
@@ -175,12 +220,17 @@ def wait_for_guarded_full_snapshot(
         or not bool(summary.get("complete"))
     ):
         return None
+    rows = list(state.items) if observed and hasattr(state, "items") else user_dao.list_inventory_items(snapshot_id)
     snapshot_uids = frozenset(
         (int(row.get("uid_slot") or 0), int(row.get("uid_serial") or 0))
-        for row in user_dao.list_inventory_items(snapshot_id)
+        for row in rows
         if int(row.get("uid_slot") or 0) > 0 and int(row.get("uid_serial") or 0) > 0
     )
-    return snapshot_id if snapshot_uids == frozen_inventory_uids else None
+    if snapshot_uids != frozen_inventory_uids:
+        return None
+    if observed and hasattr(state, "items") and observation_sink is not None:
+        observation_sink["items"] = rows
+    return snapshot_id
 
 
 def verify_complete_snapshot(
@@ -189,21 +239,30 @@ def verify_complete_snapshot(
     pending: list[dict],
     *,
     snapshot_id: int,
+    check_cancelled: Callable[[], None] | None = None,
+    observed_items: list[dict] | None = None,
 ) -> list[dict]:
     verifier = getattr(apply_service, "verify_plan_in_snapshot", None)
     if not callable(verifier):
         return pending
     unresolved: list[dict] = []
     for row in pending:
+        if check_cancelled is not None:
+            check_cancelled()
+        row.pop("full_snapshot_verification_error", None)
         try:
-            mismatch = verifier(
+            verification = apply_service.verify_plan_in_items if observed_items is not None else verifier
+            source = {"items": observed_items} if observed_items is not None else {"stable_snapshot_id": snapshot_id}
+            mismatch = verification(
                 row["plan_id"],
                 character_uid=row["character_uid"],
                 target_character_id=row["character_id"],
                 exact_loadout=True,
                 ignore_module_placement=True,
-                stable_snapshot_id=snapshot_id,
+                **source,
             )
+        except CancelledError:
+            raise
         except Exception as exc:
             row["full_snapshot_verification_error"] = str(exc)
             unresolved.append(row)
@@ -217,6 +276,8 @@ def verify_complete_snapshot(
         row["verification_source"] = "full_inventory_snapshot"
         if row.get("repaired"):
             row["repair_verified"] = True
+        if check_cancelled is not None:
+            check_cancelled()
         user_dao.mark_equipment_apply_job_item(
             row["job_item_id"],
             status="succeeded",
@@ -248,6 +309,7 @@ def verify_scoped_equipment_events(
     pending: list[dict],
     *,
     timeout: float,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> list[dict]:
     waiter = getattr(sync_service, "wait_for_observed_equipment_snapshot", None)
     if not callable(waiter):
@@ -258,17 +320,25 @@ def verify_scoped_equipment_events(
     unresolved: list[dict] = []
     deadline = time.monotonic() + max(0.0, timeout)
     for row in pending:
+        if check_cancelled is not None:
+            check_cancelled()
         required_uids = row.get("scoped_required_uids")
         cursor = row.get("scoped_snapshot_cursor")
         if not isinstance(required_uids, frozenset) or not isinstance(cursor, int):
             unresolved.append(row)
             continue
         try:
-            scoped_snapshot = waiter(
-                required_uids,
-                after_cursor=cursor,
-                timeout=max(0.0, deadline - time.monotonic()),
-            )
+            while True:
+                if check_cancelled is not None:
+                    check_cancelled()
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    scoped_snapshot = waiter(required_uids, after_cursor=cursor,
+                        timeout=min(0.25, remaining) if check_cancelled is not None else remaining)
+                    break
+                except TimeoutError:
+                    if check_cancelled is None or time.monotonic() >= deadline:
+                        raise
             row["scoped_event_observed"] = True
             _log_scoped_equipment_snapshot(
                 role_name=str(row["role_name"]),
@@ -283,6 +353,8 @@ def verify_scoped_equipment_events(
                 exact_loadout=False,
                 fragment_only=True,
             )
+        except CancelledError:
+            raise
         except TimeoutError:
             logger.info(
                 "고속 장착 부분 이벤트 진단: 캐릭터={}, 대상 아이템={}, 이번 회차에 대상 장비가 포함된 부분 이벤트를 받지 못함",
@@ -304,6 +376,8 @@ def verify_scoped_equipment_events(
         if row.get("repaired"):
             row["repair_verified"] = True
         row["verification_source"] = "scoped_equipment_event"
+        if check_cancelled is not None:
+            check_cancelled()
         user_dao.mark_equipment_apply_job_item(
             row["job_item_id"],
             status="succeeded",
@@ -347,9 +421,14 @@ def dispatch_retry_attempt(
     snapshot_id: int,
     attempt: int,
     errors: list[dict],
+    *,
+    check_cancelled: Callable[[], None] | None = None,
+    user_dao=None,
 ) -> list[dict]:
     dispatched = []
     for row in pending:
+        if check_cancelled is not None:
+            check_cancelled()
         try:
             cursor_reader = getattr(sync_service, "scoped_equipment_snapshot_cursor", None)
             if callable(cursor_reader):
@@ -380,12 +459,23 @@ def dispatch_retry_attempt(
                 attempt,
                 row["role_name"],
             )
+        except CancelledError:
+            raise
         except Exception as exc:
+            kind = "recovery_exhausted" if isinstance(exc, RecoveryStopped) else equipment_request_failure_kind(exc)
             errors.append({
                 "role_name": row["role_name"],
                 "attempt": attempt,
-                "kind": equipment_request_failure_kind(exc),
+                "kind": kind,
                 "error": f"{attempt}번째 장착 요청 실패: {exc}",
             })
+            if user_dao is not None:
+                if check_cancelled is not None:
+                    check_cancelled()
+                user_dao.mark_equipment_apply_job_item(row["job_item_id"], status="failed", verified=False,
+                    error=f"{attempt}번째 장착 요청 실패: {exc}")
             logger.error("{}번째 장착 [{}] 요청 실패: {}", attempt, row["role_name"], exc)
+            # No later role may dispatch after a repair request failed; it may
+            # already have changed game state, even when no response arrived.
+            return []
     return dispatched

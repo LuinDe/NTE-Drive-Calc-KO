@@ -5,14 +5,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from src.domain.progression_material_conversion import allocate_owned, lower_tier_ids
 from src.domain.progression_stamina import (
     FarmingStage,
-    ProgressionStaminaResult,
+    project_identification_level,
 )
 from src.domain.role_name_order import role_name_sort_key
 
@@ -57,118 +56,13 @@ from src.storage.sqlite.user_data_dao import UserDataDao
 from src.services.native_role_profile_projection import load_template_growth_defaults, project_native_role_profile
 
 
-@dataclass(frozen=True, slots=True)
-class CultivationRole:
-    character_id: int
-    name: str
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationFork:
-    fork_id: str
-    name: str
-    quality: str
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationForkSeed:
-    fork_id: str
-    fork_name: str
-    current_level: int
-    current_breakthrough_stage: int
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationSkill:
-    skill_id: str
-    category: str
-    name: str
-    current_level: int
-    maximum_level: int
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationSeed:
-    character_id: int
-    character_name: str
-    current_level: int
-    current_breakthrough_stage: int
-    skills: tuple[CultivationSkill, ...]
-    fork: CultivationForkSeed | None
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationSkillTarget:
-    skill_id: str
-    current_level: int
-    target_level: int
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationForkTarget:
-    fork_id: str
-    current_level: int
-    current_breakthrough_stage: int
-    target_level: int
-    target_breakthrough_stage: int
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationRequest:
-    character_id: int
-    current_level: int
-    current_breakthrough_stage: int
-    target_level: int
-    target_breakthrough_stage: int
-    skills: tuple[CultivationSkillTarget, ...]
-    include_character_progression: bool = True
-    include_skills: bool = True
-    fork: CultivationForkTarget | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationMaterial:
-    item_id: str
-    name: str
-    quantity: int
-    quality: str | None = None
-    icon_path: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationSection:
-    label: str
-    materials: tuple[CultivationMaterial, ...]
-    description: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationPlan:
-    character_name: str
-    status: MaterialSummaryStatus
-    sections: tuple[CultivationSection, ...]
-    totals: tuple[CultivationMaterial, ...]
-    required_experience: int
-    experience_overflow: int
-    included_breakthrough_stages: tuple[int, ...]
-    gaps: tuple[ProgressionRequirementGap, ...]
-    fork_required_experience: int = 0
-    fork_experience_overflow: int = 0
-    fork_included_breakthrough_stages: tuple[int, ...] = ()
-    owned_inputs: tuple[CultivationMaterial, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationSectionStamina:
-    label: str
-    result: ProgressionStaminaResult
-
-
-@dataclass(frozen=True, slots=True)
-class CultivationStaminaPlan:
-    total: ProgressionStaminaResult
-    sections: tuple[CultivationSectionStamina, ...]
-    stamina_item_ids: frozenset[str] = frozenset()
+from src.services.cultivation_planner_models import (
+    CultivationRole, CultivationFork, CultivationForkSeed, CultivationSkill,
+    CultivationSeed, CultivationSkillTarget, CultivationForkTarget, CultivationRequest,
+    CultivationMaterial, CultivationSection, CultivationPlan, CultivationSectionStamina,
+    CultivationStaminaPlan,
+    CultivationPreparedTarget,
+)
 
 
 class CultivationPlannerService:
@@ -201,6 +95,67 @@ class CultivationPlannerService:
             )
         finally:
             queries.close()
+
+    def dataset_metadata(self) -> dict[str, object]:
+        """历史只保存可携带资料身份，文件路径与 stat 留在运行期边界。"""
+        queries = self._character_queries_factory(self._static_database_path)
+        try:
+            metadata = queries.character_catalog_metadata()
+            return {
+                "dataset_id": str(metadata["dataset_id"]),
+                "schema_version": int(metadata["schema_version"]),
+                "importer_version": str(metadata["importer_version"]),
+                "built_at_utc": str(metadata["built_at_utc"]),
+            }
+        finally:
+            queries.close()
+
+    def validate_history_configuration(self, configuration: dict[str, object]) -> None:
+        """恢复前核对所有模块的正式身份和范围，不以账号当前状态替换历史。"""
+        from src.domain.cultivation_history import normalize_configuration
+
+        draft = normalize_configuration(configuration)
+        project_identification_level(draft["hunter_level"], effective_level=draft["identification_level"])
+        issues: list[str] = []
+        for target in draft["targets"]:
+            try:
+                detail = self._load_detail(target["character_id"])
+                if detail.progression is None:
+                    raise ValueError("현재 데이터에 캐릭터 성장 범위가 없습니다")
+                for prefix in ("current", "target"):
+                    _validate_state(target[f"{prefix}_level"], target[f"{prefix}_stage"],
+                                    detail.progression.breakthrough_stages)
+                skills = {skill.skill_id: skill for skill in detail.skills if skill.levels}
+                if {skill["skill_id"] for skill in target["skills"]} != set(skills):
+                    raise ValueError("스킬 구성이 현재 데이터와 일치하지 않습니다")
+                for skill in target["skills"]:
+                    maximum = _skill_maximum_level(skills[skill["skill_id"]])
+                    if max(skill["current_level"], skill["target_level"]) > maximum:
+                        raise ValueError("스킬 레벨이 현재 데이터 범위를 벗어났습니다")
+                if target["fork"] is not None:
+                    fork = target["fork"]
+                    fork_detail = self._load_fork_detail(fork["fork_id"])
+                    for prefix in ("current", "target"):
+                        _validate_fork_state(fork[f"{prefix}_level"], fork[f"{prefix}_stage"], fork_detail)
+            except (ValueError, KeyError) as error:
+                issues.append(f"{target['name']}：{error}")
+        item_ids = {item["item_id"] for item in draft["owned_materials"]}
+        if item_ids:
+            dao = self._terminology_dao_factory(self._static_database_path)
+            try:
+                ordered_ids = tuple(sorted(item_ids))
+                present = {
+                    str(row["item_id"])
+                    for offset in range(0, len(ordered_ids), 400)
+                    for row in dao.list_progression_items(ordered_ids[offset:offset + 400])
+                }
+            finally:
+                dao.close()
+            missing = item_ids - present
+            if missing:
+                issues.append("현재 데이터에 없는 재료 ID:" + "、".join(sorted(missing)))
+        if issues:
+            raise ValueError("기록 설정을 불러오지 않았습니다. 기존 초안은 그대로 유지됩니다.\n" + "\n".join(issues))
 
     def list_forks(self) -> tuple[CultivationFork, ...]:
         """Return every formal fork so the UI can present image-card selection."""
@@ -426,10 +381,11 @@ class CultivationPlannerService:
         owned_quantities: Mapping[str, int],
         hunter_level: int,
         effective_identification_level: int | None,
+        farming_stages: tuple[FarmingStage, ...] | None = None,
     ) -> CultivationStaminaPlan:
         """Calculate merged and per-section stamina from one frozen static dataset."""
 
-        stages = self.load_farming_stages()
+        stages = self.load_farming_stages() if farming_stages is None else farming_stages
         normalized_owned = normalize_owned_quantities(owned_quantities)
         total = calculate_stamina_result(
             plan.totals,
@@ -458,6 +414,12 @@ class CultivationPlannerService:
         return CultivationStaminaPlan(
             total, tuple(section_results), stamina_material_ids(stages)
         )
+
+    def prepare(self, request: CultivationRequest) -> CultivationPreparedTarget:
+        """只准备需求、可上合输入和副本分类，不运行体力求解。"""
+        plan = self.calculate(request)
+        stages = self.load_farming_stages()
+        return CultivationPreparedTarget(request, plan, stages, stamina_material_ids(stages))
 
     def load_farming_stages(self) -> tuple[FarmingStage, ...]:
         """Freeze the deterministic farming-stage dataset for one calculation."""
@@ -779,4 +741,5 @@ __all__ = [
     "CultivationPlan", "CultivationPlannerService", "CultivationRequest", "CultivationRole",
     "CultivationSectionStamina", "CultivationStaminaPlan",
     "CultivationSection", "CultivationSeed", "CultivationSkill", "CultivationSkillTarget",
+    "CultivationPreparedTarget",
 ]

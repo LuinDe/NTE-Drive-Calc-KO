@@ -14,6 +14,10 @@ from src.integrations.game_component_bundle import (
 
 
 NATIVE_PLUGIN_LAYOUT = "native-capture-v1"
+HOT_PLUGIN_LAYOUT = "native-plugins-v2"
+SPLIT_PLUGIN_LAYOUT = "native-plugins-v3"
+HOT_PLUGIN_LAYOUTS = frozenset({HOT_PLUGIN_LAYOUT, SPLIT_PLUGIN_LAYOUT})
+NATIVE_PLUGIN_LAYOUTS = frozenset({NATIVE_PLUGIN_LAYOUT, *HOT_PLUGIN_LAYOUTS})
 NATIVE_PLUGIN_CAPABILITIES = frozenset({
     "combat.hit_buff.v1", "character.snapshot.v1", "inventory.snapshot.v1",
     "team.snapshot.v1", "environment.snapshot.v1",
@@ -21,6 +25,35 @@ NATIVE_PLUGIN_CAPABILITIES = frozenset({
 NATIVE_PLUGIN_DEPLOYMENT_PATHS = MappingProxyType({
     "host": "d3d12.dll", "capture_plugin": "NTE_Capture.dll",
 })
+HOT_PLUGIN_DEPLOYMENT_PATHS = MappingProxyType({
+    "user_plugin": "plugins/NTE_PluginUser.dll",
+    "user_signature": "plugins/NTE_PluginUser.dll.sig",
+    "capture_plugin": "plugins/NTE_PluginCombat.dll",
+    "capture_signature": "plugins/NTE_PluginCombat.dll.sig",
+    "host": "d3d12.dll",
+})
+
+
+PERFORMANCE_DEPLOYMENT_PATHS = {
+    'performance_plugin': 'plugins/NTE_PluginPerformance.dll',
+    'performance_signature': 'plugins/NTE_PluginPerformance.dll.sig',
+}
+HUD_DEPLOYMENT_PATHS = {
+    "hud_plugin": "plugins/NTE_PluginHUD.dll",
+    "hud_signature": "plugins/NTE_PluginHUD.dll.sig",
+}
+
+
+def native_deployment_paths(layout: str, roles=()) -> Mapping[str, str]:
+    if layout == SPLIT_PLUGIN_LAYOUT:
+        return MappingProxyType({**HOT_PLUGIN_DEPLOYMENT_PATHS, **HUD_DEPLOYMENT_PATHS,
+                                 **PERFORMANCE_DEPLOYMENT_PATHS})
+    if layout == HOT_PLUGIN_LAYOUT:
+        return MappingProxyType({**HOT_PLUGIN_DEPLOYMENT_PATHS, **(PERFORMANCE_DEPLOYMENT_PATHS
+                                if set(roles) & PERFORMANCE_DEPLOYMENT_PATHS.keys() else {})})
+    if layout == NATIVE_PLUGIN_LAYOUT:
+        return NATIVE_PLUGIN_DEPLOYMENT_PATHS
+    raise ValueError("unsupported native layout")
 REQUIRED_NATIVE_PLUGIN_ROLES = frozenset({
     *NATIVE_PLUGIN_DEPLOYMENT_PATHS, "core", "capture_license", "capture_source", "core_license", "core_source",
 })
@@ -36,6 +69,10 @@ class NativePluginBundleInspection(GameComponentBundleInspection):
     native_capabilities: frozenset[str] = frozenset()
     upgrade_from: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: MappingProxyType({}))
 
+    @property
+    def deployment_paths(self) -> Mapping[str, str]:
+        return native_deployment_paths(self.layout, self.roles)
+
 
 def native_upgrade_predecessors(payload: dict) -> Mapping[str, tuple[str, ...]]:
     """Validate reviewed predecessor hashes against exact game deployment paths."""
@@ -44,7 +81,8 @@ def native_upgrade_predecessors(payload: dict) -> Mapping[str, tuple[str, ...]]:
         raise ValueError("upgrade_from mapping")
     predecessors = {}
     for relative, hashes in declared.items():
-        if relative not in NATIVE_PLUGIN_DEPLOYMENT_PATHS.values():
+        if relative not in {*NATIVE_PLUGIN_DEPLOYMENT_PATHS.values(), *HOT_PLUGIN_DEPLOYMENT_PATHS.values(),
+                            *PERFORMANCE_DEPLOYMENT_PATHS.values(), *HUD_DEPLOYMENT_PATHS.values()}:
             raise ValueError("upgrade_from deployment path")
         if not isinstance(hashes, list) or not hashes or any(
             not isinstance(digest, str) or not _HASH.fullmatch(digest) for digest in hashes
@@ -57,15 +95,62 @@ def native_upgrade_predecessors(payload: dict) -> Mapping[str, tuple[str, ...]]:
     return MappingProxyType(predecessors)
 
 
+def _validate_split_protection(root: Path, roles: dict, files: dict, digests: dict) -> None:
+    """Bind every new delivery DLL to its upstream checked protection and notice."""
+    relative = Path(roles["capture_source"]).with_name("capture-component.json").as_posix()
+    if relative not in files:
+        raise ValueError("missing protected component metadata")
+    metadata = json.loads((root / relative).read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+    if not isinstance(metadata, dict):
+        raise ValueError("protected component metadata")
+    if (metadata.get("layout") != SPLIT_PLUGIN_LAYOUT or
+            metadata.get("sourceTreeSha256") != digests["capture"]):
+        raise ValueError("protected component input identity")
+    protection = metadata.get("protection", {})
+    if not isinstance(protection, dict):
+        raise ValueError("protected component metadata")
+    if protection.get("tool") != "VMProtect" or not _HASH.fullmatch(protection.get("policy_sha256", "")):
+        raise ValueError("protected component policy")
+    binaries = protection.get("binaries", {})
+    dll_roles = ("host", "user_plugin", "capture_plugin", "hud_plugin", "performance_plugin")
+    expected_names = {Path(roles[role]).name for role in dll_roles}
+    if not isinstance(binaries, dict) or set(binaries) != expected_names:
+        raise ValueError("all delivery DLLs require protection")
+    for role in dll_roles:
+        path = roles[role]
+        name = Path(path).name
+        record = binaries[name]
+        if not isinstance(record, dict):
+            raise ValueError("DLL protection record")
+        options = ["StripDebugInfo"]
+        profile = "selected-functions-v1"
+        if (record.get("sha256") != files[path] or type(record.get("functions")) is not int or
+                record["functions"] <= 0 or record.get("profile") != {"name": profile, "options": options}):
+            raise ValueError("DLL protection identity/profile")
+        notice = record.get("notice", {})
+        if not isinstance(notice, dict):
+            raise ValueError("DLL embedded notice")
+        if (notice.get("schema") != "nte.component-notice/1" or notice.get("component") != Path(name).stem or
+                any(not isinstance(notice.get(key), str) or not notice[key]
+                    for key in ("purpose", "authorization", "prohibited_use", "license_boundary"))):
+            raise ValueError("DLL embedded notice identity")
+
+
 def _inspect_native_plugin_payload(root: Path, manifest: Path, payload: object) -> NativePluginBundleInspection:
     files, roles, sizes, digests, commits = {}, {}, {}, {}, {}
     capabilities = frozenset()
     capture_protocol = None
     predecessors = MappingProxyType({})
     issues = []
+    layout = NATIVE_PLUGIN_LAYOUT
     try:
-        if not isinstance(payload, dict) or payload.get("layout") != NATIVE_PLUGIN_LAYOUT:
+        if not isinstance(payload, dict) or payload.get("layout") not in NATIVE_PLUGIN_LAYOUTS:
             raise ValueError("layout")
+        layout = payload["layout"]
+        deployment_paths = native_deployment_paths(layout, payload.get("roles", {}))
+        required_roles = REQUIRED_NATIVE_PLUGIN_ROLES | deployment_paths.keys()
+        if layout in HOT_PLUGIN_LAYOUTS and payload.get("plugin_policy") != "calc-publisher-rsa3072-sha256-v1":
+            raise ValueError("publisher policy")
         predecessors = native_upgrade_predecessors(payload)
         if type(payload.get("protocol_version")) is not int or payload["protocol_version"] != 1:
             raise ValueError("manifest protocol")
@@ -78,7 +163,7 @@ def _inspect_native_plugin_payload(root: Path, manifest: Path, payload: object) 
         raw_capabilities = payload.get("capabilities")
         if not isinstance(declared, dict) or not declared or not isinstance(declared_sizes, dict) or set(declared_sizes) != set(declared):
             raise ValueError("files and sizes")
-        if not isinstance(declared_roles, dict) or not REQUIRED_NATIVE_PLUGIN_ROLES.issubset(declared_roles):
+        if not isinstance(declared_roles, dict) or not required_roles.issubset(declared_roles):
             raise ValueError("required roles")
         if not isinstance(declared_commits, dict) or not {"capture", "core"}.issubset(declared_commits) or any(
             not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not _COMMIT.fullmatch(value)
@@ -94,6 +179,8 @@ def _inspect_native_plugin_payload(root: Path, manifest: Path, payload: object) 
         if len(set(raw_capabilities)) != len(raw_capabilities) or not NATIVE_PLUGIN_CAPABILITIES.issubset(raw_capabilities):
             raise ValueError("required capabilities")
         capabilities = frozenset(raw_capabilities)
+        if 'performance.trace.v1' in capabilities and not PERFORMANCE_DEPLOYMENT_PATHS.keys() <= declared_roles.keys():
+            raise ValueError('performance capability requires signed plugin pair')
         commits = {key: value.casefold() for key, value in declared_commits.items()}
         digests = {key: value.casefold() for key, value in declared_digests.items()}
         seen = set()
@@ -117,16 +204,18 @@ def _inspect_native_plugin_payload(root: Path, manifest: Path, payload: object) 
             if not isinstance(role, str) or not isinstance(relative, str) or relative not in files:
                 raise ValueError("role binding")
             roles[role] = relative
-        if len({roles[role] for role in REQUIRED_NATIVE_PLUGIN_ROLES}) != len(REQUIRED_NATIVE_PLUGIN_ROLES):
+        if len({roles[role] for role in required_roles}) != len(required_roles):
             raise ValueError("shared required role file")
-        for role, filename in {**NATIVE_PLUGIN_DEPLOYMENT_PATHS, "core": "nte-core.exe"}.items():
+        for role, filename in {**deployment_paths, "core": "nte-core.exe"}.items():
             relative = roles[role]
             if Path(relative).name != Path(filename).name or sizes[relative] <= 0:
                 raise ValueError("program identity")
+        if layout == SPLIT_PLUGIN_LAYOUT:
+            _validate_split_protection(root, roles, files, digests)
     except (OSError, UnicodeError, ValueError, TypeError):
         issues.append("네이티브 수집 번들 매니페스트의 레이아웃, 출처, 입력 요약, 기능 또는 파일 선언이 유효하지 않습니다.")
     return NativePluginBundleInspection(
-        manifest, MappingProxyType(files), MappingProxyType(roles), tuple(issues),
+        manifest, MappingProxyType(files), MappingProxyType(roles), tuple(issues), layout=layout,
         file_sizes=MappingProxyType(sizes), input_digests=MappingProxyType(digests),
         source_commits=MappingProxyType(commits), capture_protocol_version=capture_protocol,
         native_capabilities=capabilities, upgrade_from=predecessors,

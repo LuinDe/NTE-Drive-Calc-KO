@@ -12,7 +12,7 @@ _STEP_LABELS = ("기존 컴포넌트 확인", "기존 배포 정리", "작업 �
 _STAGES = {
     "cleanup": (1, "이전 버전 컴포넌트 발견", "이전 배포가 현재 버전과 일치하지 않습니다.", "게임을 완전히 종료하세요; Loader 사용자는 런처도 종료해야 합니다. 그다음 이전 컴포넌트를 정리하세요.", "기존 컴포넌트 정리"),
     "path": (0, "게임 위치 확인 필요", "이전 배포의 게임 경로가 아직 확인되지 않았습니다.", "환경 설정으로 이동해 현재 게임의 HTGame.exe를 선택한 뒤 다시 확인하세요.", "환경 설정으로 이동"),
-    "mode": (2, "구버전 컴포넌트 정리 완료", "정리하면 동기화가 일시 중지되며, 기존 계정 데이터는 그대로 유지됩니다.", "작업 모드 설정으로 이동해 필요한 모드를 확인하세요.", "작업 모드 확인"),
+    "mode": (2, "구버전 컴포넌트 정리 완료", "정리하면 동기화가 일시 중지되며, 기존 계정 데이터는 그대로 유지됩니다.", "작업 모드 설정으로 이동해 필요한 모드를 다시 선택하고 확인하세요. 기존 모드를 계속 사용하더라도 확인이 필요합니다.", "작업 모드 확인"),
     "deploy": (3, "현재 컴포넌트 배포 준비", "작업 모드가 확인되었습니다. 컴포넌트는 아직 배포 대기 중입니다.", "환경 설정으로 이동해 선택한 D3D 또는 Loader 방식으로 배포하세요. 배포 전에 게임을 종료하고, Loader는 런처도 종료해야 합니다. 배포 후 검사 상세에서 동기화 상태를 확인할 수 있습니다.", "배포로 이동"),
     "done": (2, "정리 완료", "현재 모드에서는 네이티브 컴포넌트를 배포할 필요가 없습니다.", "동기화가 필요하면 작업 공간의 안내에 따라 동기화를 켜세요.", "가이드 완료"),
 }
@@ -85,10 +85,10 @@ class ComponentUpgradeDialog(QDialog):
             for position, label in enumerate(_STEP_LABELS)
         ))
         self.title.setText(title)
-        self.reason.setText("원인:" + reason)
+        self.reason.setText("원인: " + reason)
         if stage == "deploy":
             next_step = next_step.replace("D3D 또는 Loader", "Loader" if method == "loader" else "D3D")
-        self.next_step.setText("다음 단계:" + next_step)
+        self.next_step.setText("다음 단계: " + next_step)
         self.action.setText(action)
 
     def _act(self) -> None:

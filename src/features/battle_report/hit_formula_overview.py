@@ -15,7 +15,10 @@ from src.services.skill_name_rendering_service import battle_hit_skill_label
 
 def factor_name(factor) -> str:
     return {"Atk 곱연산 구간": "攻击力", "HPMax 곱연산 구간": "HP 상한", "Def 곱연산 구간": "防御力",
-            "배율 구간": "技能倍率", "치명 피해 배율": "치명타 배율"}.get(factor.label, factor.label)
+            "배율 구간": "技能倍率", "치명 피해 배율": "치명타 배율",
+            # native page labels stay Chinese (nte-analysis-core output)
+            "Atk 乘区": "攻击力", "HPMax 乘区": "HP 상한", "Def 乘区": "防御力",
+            "倍率区": "技能倍率", "暴击伤害倍率": "치명타 배율"}.get(factor.label, factor.label)
 
 
 def formula_layout(replay):

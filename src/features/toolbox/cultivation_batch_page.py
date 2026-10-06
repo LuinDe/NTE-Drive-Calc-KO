@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
+import json
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
@@ -14,12 +16,15 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from src.app.theme import themed_style
+from src.features.toolbox.cultivation_batch_result import CultivationBatchResultMixin
+from src.features.toolbox.cultivation_history_binding import CultivationHistoryDraftBinding, CultivationHistorySaveStatus
+from src.services.cultivation_history_projection import batch_history_payload
+from src.services.cultivation_history_restore import PreparedHistoryRestore
 from src.features.toolbox.cultivation_batch_controller import (
     CultivationBatchController,
 )
@@ -28,7 +33,6 @@ from src.features.toolbox.cultivation_batch_target import (
 )
 from src.features.toolbox.cultivation_owned_materials import (
     CultivationOwnedMaterials,
-    build_material_grid,
     visible_materials,
     visible_owned_inputs,
 )
@@ -38,18 +42,14 @@ from src.features.toolbox.cultivation_selectors import (
 )
 from src.features.toolbox.cultivation_stamina_ui import (
     CultivationStaminaControls,
-    stamina_runs_text,
-    stamina_summary_text,
-    style_stamina_badge,
 )
 from src.integrations.bundled_resources import bundled_game_ui_asset_root
 from src.services.cultivation_batch_planner_service import (
     CultivationBatchPlan,
     CultivationBatchPlannerService,
     CultivationBatchRequest,
-    CultivationMaterialSource,
+    CultivationBatchPreparation,
     CultivationTargetDraft,
-    CultivationTargetPlan,
 )
 from src.services.cultivation_planner_service import (
     CultivationFork,
@@ -62,7 +62,7 @@ from src.services.game_ui_asset_catalog import GameUiAssetCatalog
 from src.utils.cultivation_trace import trace_cultivation
 
 
-class CultivationBatchContent(QWidget):
+class CultivationBatchContent(CultivationBatchResultMixin, QWidget):
     """Own an ordered multi-target draft for the current account context."""
 
     plan_available = Signal(bool)
@@ -77,10 +77,14 @@ class CultivationBatchContent(QWidget):
         context_identity: Callable[[], object] | None,
         parent: QWidget,
         asset_root: str | Path | None = None,
+        history_binding: CultivationHistoryDraftBinding | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
+        self._history_binding = history_binding
+        self._restoring = False
         self._context_identity = context_identity
+        self._initial_identity = self._identity()
         self._batch_service = CultivationBatchPlannerService(service)
         self._controller = CultivationBatchController(
             self._batch_service,
@@ -107,7 +111,14 @@ class CultivationBatchContent(QWidget):
         self._recalculate_timer = QTimer(self)
         self._recalculate_timer.setSingleShot(True)
         self._recalculate_timer.setInterval(250)
-        self._recalculate_timer.timeout.connect(self.calculate)
+        self._recalculate_timer.timeout.connect(lambda: self.calculate(explicit=False))
+        self._prepare_timer = QTimer(self)
+        self._prepare_timer.setSingleShot(True)
+        self._prepare_timer.setInterval(250)
+        self._prepare_timer.timeout.connect(self._prepare_materials)
+        self._controller.preparation_ready.connect(self._receive_preparation)
+        self._controller.preparation_error.connect(self._preparation_failed)
+        self._controller.preparing_changed.connect(self._preparation_busy)
         self._build()
         self._connect_controller()
         self._load_roles()
@@ -157,6 +168,10 @@ class CultivationBatchContent(QWidget):
         self._stamina_controls = CultivationStaminaControls(self)
         self._stamina_controls.values_changed.connect(self._draft_changed)
         root.addWidget(self._stamina_controls)
+        self._preparation_hint = QLabel("목표를 정하면 보유 재료 입력 항목을 미리 표시합니다.", self)
+        self._preparation_hint.setWordWrap(True)
+        self._preparation_hint.setTextFormat(Qt.TextFormat.PlainText)
+        root.addWidget(self._preparation_hint)
         self._owned_materials = CultivationOwnedMaterials(
             self._asset_catalog.progression_item_icon,
             self,
@@ -174,6 +189,8 @@ class CultivationBatchContent(QWidget):
         ))
         self._calculate_button.clicked.connect(self.calculate)
         root.addWidget(self._calculate_button)
+        if self._history_binding is not None:
+            root.addWidget(CultivationHistorySaveStatus(self._history_binding, self))
 
         self._result = QFrame(self)
         self._result.setObjectName("cultivationBatchResult")
@@ -341,17 +358,49 @@ class CultivationBatchContent(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "다중 캐릭터 육성", f"아크 육성 상태 읽기 실패: {exc}")
 
-    def calculate(self) -> None:
+    def calculate(self, _checked: bool = False, *, explicit: bool = True) -> None:
         if not self._cards:
             self._set_result_message("먼저 캐릭터 목표를 하나 이상 선택하세요.")
             return
         identity = self._identity()
+        if identity != self._initial_identity:
+            return
+        self._prepare_timer.stop()
+        self._recalculate_timer.stop()
         self._trace_sequence += 1
         self._active_trace_id = self._trace_sequence
         request = self._build_request(identity)
+        if self._history_binding is not None:
+            envelope = self._history_binding.freeze(self.export_history_configuration(), explicit=explicit)
+            request = replace(request, history_envelope=envelope)
         self._has_calculated = True
         trace_cultivation(request.trace_id, "ui.submit", targets=len(request.ordered_targets), owned_fields=len(request.owned_quantities))
         self._controller.submit(request, identity)
+
+    def _prepare_materials(self) -> None:
+        identity = self._identity()
+        if self._cards and not self._restoring and identity == self._initial_identity:
+            self._controller.prepare(self._build_request(identity), identity)
+
+    def _receive_preparation(self, value: object) -> None:
+        if not isinstance(value, CultivationBatchPreparation):
+            return
+        if value.ordered_targets != self._build_request(self._identity()).ordered_targets:
+            return
+        self._last_materials = value.merged_totals
+        self._last_input_options = value.owned_inputs or value.merged_totals
+        self._last_stamina_item_ids = value.stamina_item_ids
+        self._owned_materials.set_materials(self._visible_inputs())
+        self._preparation_hint.hide()
+
+    def _preparation_busy(self, busy: bool) -> None:
+        if busy:
+            self._preparation_hint.setText("재료 입력을 준비하는 중입니다. 스태미나는 아직 계산하지 않았습니다.")
+            self._preparation_hint.show()
+
+    def _preparation_failed(self, _message: str) -> None:
+        self._preparation_hint.setText("재료 입력 준비에 실패했습니다. 입력한 수량은 유지되며, 계산을 눌러 다시 시도할 수 있습니다.")
+        self._preparation_hint.show()
 
     def _build_request(self, identity: object) -> CultivationBatchRequest:
         account_id, generation, dataset = _identity_fields(identity)
@@ -382,10 +431,17 @@ class CultivationBatchContent(QWidget):
         self._owned_materials.set_materials(self._visible_inputs())
         trace_cultivation(value.trace_id, "ui.owned_inputs_updated")
         self._materials_dirty = False
+        if self._history_binding is not None and value.history_envelope is not None:
+            self._history_binding.accept(
+                value.history_envelope, lambda: batch_history_payload(
+                    value.history_envelope.configuration_json, value, dict(value.dataset_metadata),
+                ), history_error=value.history_error,
+            )
         if self._calculate_button.isEnabled():
             self._calculate_button.setText("다중 캐릭터 재료 및 스태미나 계산")
         self.plan_available.emit(True)
         self._render_plan(value)
+        self._preparation_hint.hide()
         trace_cultivation(value.trace_id, "ui.result_rendered")
         trace_cultivation(value.trace_id, "ui.scroll_requested")
         self.result_view_requested.emit()
@@ -407,10 +463,15 @@ class CultivationBatchContent(QWidget):
         )
 
     def _owned_quantities_changed(self) -> None:
+        if self._restoring:
+            return
+        if self._history_binding is not None:
+            self._history_binding.invalidate()
+        self._controller.invalidate()
+        self._prepare_timer.start()
         if not self._has_calculated:
             return
         self._recalculate_timer.stop()
-        self._controller.invalidate()
         if not self._materials_dirty:
             self._materials_dirty = True
             self._last_plan = None
@@ -420,9 +481,17 @@ class CultivationBatchContent(QWidget):
             self._calculate_button.setText("여러 캐릭터의 재료와 스태미나 다시 계산")
 
     def _draft_changed(self, *_args: object) -> None:
+        if self._restoring:
+            return
+        if self._history_binding is not None:
+            self._history_binding.invalidate()
+        self._controller.invalidate()
+        self._prepare_timer.stop()
         if not self._cards:
+            if self._history_binding is not None:
+                self._history_binding.reset()
             self._recalculate_timer.stop()
-            self._controller.invalidate()
+            self._controller.invalidate(clear_preparation=True)
             self._has_calculated = False
             self._materials_dirty = False
             self._last_plan = None
@@ -436,10 +505,57 @@ class CultivationBatchContent(QWidget):
             self._set_result_message("캐릭터 목표를 선택한 후 캐릭터 간 합계를 계산합니다.")
             return
         if self._has_calculated:
-            self._controller.invalidate()
+            self._last_plan = None
+            self.plan_available.emit(False)
+            self._set_result_message("육성 목표가 수정되어 이전 결과는 만료되었습니다.")
             if not self._materials_dirty:
                 self._recalculate_timer.start()
+            else:
+                self._prepare_timer.start()
+        else:
+            self._prepare_timer.start()
         self.layout_changed.emit()
+
+    def export_history_configuration(self) -> dict[str, object]:
+        hunter, identification = self._stamina_controls.values()
+        return {
+            "version": 1, "mode": "batch", "hunter_level": hunter, "identification_level": identification,
+            "material_scope": self._material_scope, "owned_materials": self._owned_materials.export_history_materials(),
+            "targets": [card.export_history_target() for card in self._cards],
+        }
+
+    def restore_from_history(self, prepared: PreparedHistoryRestore) -> None:
+        if prepared.mode != "batch":
+            raise ValueError("기록의 모드가 일치하지 않습니다")
+        configuration = json.loads(prepared.configuration_json)
+        self._recalculate_timer.stop()
+        self._prepare_timer.stop()
+        self._controller.invalidate(clear_preparation=True)
+        self._restoring = True
+        try:
+            for card in self._cards:
+                self._cards_layout.removeWidget(card)
+                card.deleteLater()
+            self._cards.clear()
+            for target, seed in zip(configuration["targets"], prepared.seeds, strict=True):
+                self._append_target(seed)
+                self._cards[-1].restore_history_target(target)
+            self._stamina_controls.restore_values(configuration["hunter_level"], configuration["identification_level"])
+            self._owned_materials.clear_materials()
+            self._owned_materials.restore_history_materials(configuration["owned_materials"])
+            self._material_scope = configuration["material_scope"]
+            self._has_calculated = False
+            self._materials_dirty = False
+            self._last_plan = None
+            self._last_materials = ()
+            self._last_input_options = ()
+            self._last_stamina_item_ids = frozenset()
+        finally:
+            self._restoring = False
+        self._refresh_target_state()
+        self.plan_available.emit(False)
+        self._set_result_message("기록된 설정을 불러왔습니다. 현재 상태와 재료 수량을 확인한 후 계산을 누르세요.")
+        self._prepare_timer.start()
 
     def set_material_scope(self, scope: str) -> None:
         if scope not in {"all", "stamina"} or scope == self._material_scope:
@@ -464,223 +580,6 @@ class CultivationBatchContent(QWidget):
             self._last_stamina_item_ids,
         )
 
-    def _render_plan(self, plan: CultivationBatchPlan) -> None:
-        trace_cultivation(plan.trace_id, "ui.render_begin")
-        retired = self._clear_result()
-        self._result_layout.addWidget(self._combined_panel(plan))
-        ledger = _ledger_index(plan.source_ledger)
-        for target in plan.target_plans:
-            self._result_layout.addWidget(self._target_result(target, ledger))
-        trace_cultivation(plan.trace_id, "ui.result_widgets_attached", targets=len(plan.target_plans))
-        self._result_layout.addStretch()
-        self.result_replaced.emit(plan.trace_id, retired)
-        self.layout_changed.emit()
-
-    def _combined_panel(self, plan: CultivationBatchPlan) -> QFrame:
-        panel = QFrame(self._result)
-        panel.setObjectName("cultivationBatchCombinedTotals")
-        panel.setStyleSheet(themed_style(
-            "QFrame#cultivationBatchCombinedTotals{background:#0d1117;"
-            "border:1px solid #58a6ff;border-radius:8px;}"
-        ))
-        layout = QVBoxLayout(panel)
-        header = QHBoxLayout()
-        title = QLabel("캐릭터 간 합계 필요", panel)
-        title.setStyleSheet(themed_style("color:#58a6ff;font-size:15px;font-weight:900"))
-        header.addWidget(title)
-        header.addWidget(QLabel("던전 드롭 병합 시 중복 제거됨", panel))
-        header.addStretch(1)
-        badge = QLabel(stamina_summary_text(plan.combined_stamina), panel)
-        style_stamina_badge(badge)
-        header.addWidget(badge)
-        layout.addLayout(header)
-        if plan.gaps:
-            warning = QLabel(
-                f"정식 데이터 공백이 {len(plan.gaps)}건 있으며, 합계에는 식별된 재료만 포함됩니다.",
-                panel,
-            )
-            warning.setStyleSheet(themed_style("color:#d29922;font-weight:800"))
-            layout.addWidget(warning)
-        if plan.saved_stamina:
-            saved = QLabel(f"캐릭터별로 따로 파밍할 때보다 통합 방안이 스태미나를 {plan.saved_stamina:,} 절약합니다", panel)
-            saved.setStyleSheet(themed_style("color:#3fb950;font-weight:800"))
-            layout.addWidget(saved)
-        remaining_totals = self._visible(plan.remaining_totals)
-        if remaining_totals:
-            grid = build_material_grid(
-                remaining_totals,
-                icon_lookup=self._asset_catalog.progression_item_icon,
-                parent=panel,
-            )
-            grid.layout_changed.connect(self.layout_changed)
-            layout.addWidget(grid)
-        else:
-            message = (
-                "이번 목표에는 스태미나를 소모해 파밍해야 하는 재료가 없습니다"
-                if self._material_scope == "stamina" and not self._visible(plan.merged_totals)
-                else "보유 재료가 모든 캐릭터의 필요량을 충족합니다"
-            )
-            layout.addWidget(QLabel(message, panel))
-        runs = stamina_runs_text(plan.combined_stamina)
-        if runs:
-            layout.addWidget(_muted_label(runs, panel))
-        return panel
-
-    def _target_result(
-        self,
-        target: CultivationTargetPlan,
-        ledger: dict[tuple[str, int], tuple[CultivationMaterialSource, ...]],
-    ) -> QFrame:
-        panel = QFrame(self._result)
-        panel.setObjectName("cultivationBatchTargetResult")
-        panel.setStyleSheet(themed_style(
-            "QFrame#cultivationBatchTargetResult{background:#0d1117;"
-            "border:1px solid #30363d;border-radius:8px;}"
-        ))
-        root = QVBoxLayout(panel)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        toggle = QToolButton(panel)
-        toggle.setObjectName("cultivationBatchTargetResultToggle")
-        toggle.setText(f"{target.plan.character_name} · 상세 항목 {len(target.plan.sections)}개")
-        toggle.setCheckable(True)
-        toggle.setChecked(target.line_id in self._expanded_results)
-        toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        root.addWidget(toggle)
-        content = QWidget(panel)
-        content.setObjectName("cultivationBatchTargetResultContent")
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(10, 4, 10, 10)
-        layout.setSpacing(8)
-        summary = QHBoxLayout()
-        summary.addWidget(QLabel("이 캐릭터에 추가로 필요", content))
-        summary.addStretch(1)
-        badge = QLabel(stamina_summary_text(target.stamina.total), content)
-        style_stamina_badge(badge)
-        summary.addWidget(badge)
-        layout.addLayout(summary)
-        root.addWidget(content)
-        details_built = False
-
-        def show_details(expanded: bool) -> None:
-            nonlocal details_built
-            if expanded and not details_built:
-                details_built = True
-                self._populate_target_details(content, layout, target, ledger)
-            self._toggle_result(target.line_id, toggle, content, expanded)
-
-        toggle.toggled.connect(show_details)
-        show_details(toggle.isChecked())
-        return panel
-
-    def _populate_target_details(
-        self,
-        content: QWidget,
-        layout: QVBoxLayout,
-        target: CultivationTargetPlan,
-        ledger: dict[tuple[str, int], tuple[CultivationMaterialSource, ...]],
-    ) -> None:
-        """Build large material grids only when this result is opened."""
-
-        remaining_totals = self._visible(target.remaining_totals)
-        if remaining_totals:
-            grid = build_material_grid(
-                remaining_totals,
-                icon_lookup=self._asset_catalog.progression_item_icon,
-                parent=content,
-            )
-            grid.layout_changed.connect(self.layout_changed)
-            layout.addWidget(grid)
-        for index, section in enumerate(target.plan.sections):
-            layout.addWidget(self._section_result(
-                target,
-                index,
-                section.label,
-                section.materials,
-                ledger.get((target.line_id, index), ()),
-            ))
-
-    def _section_result(
-        self,
-        target: CultivationTargetPlan,
-        index: int,
-        label: str,
-        materials: tuple[CultivationMaterial, ...],
-        rows: tuple[CultivationMaterialSource, ...],
-    ) -> QFrame:
-        card = QFrame(self._result)
-        card.setObjectName("cultivationBatchSectionResult")
-        card.setStyleSheet(themed_style(
-            "QFrame#cultivationBatchSectionResult{background:#161b22;"
-            "border:1px solid #30363d;border-radius:7px;}"
-        ))
-        layout = QVBoxLayout(card)
-        header = QHBoxLayout()
-        title = QLabel(label, card)
-        title.setStyleSheet(themed_style("color:#58a6ff;font-weight:800"))
-        header.addWidget(title)
-        header.addStretch(1)
-        stamina = (
-            target.stamina.sections[index].result
-            if index < len(target.stamina.sections) else None
-        )
-        badge = QLabel(stamina_summary_text(stamina), card)
-        style_stamina_badge(badge)
-        header.addWidget(badge)
-        layout.addLayout(header)
-        materials = self._visible(materials)
-        remaining_by_id = {row.item_id: row.remaining_quantity for row in rows}
-        remaining = tuple(
-            _quantity(material, remaining_by_id.get(material.item_id, material.quantity))
-            for material in materials
-            if remaining_by_id.get(material.item_id, material.quantity) > 0
-        )
-        if remaining:
-            grid = build_material_grid(
-                remaining,
-                icon_lookup=self._asset_catalog.progression_item_icon,
-                parent=card,
-                minimum_card_width=118,
-            )
-            grid.layout_changed.connect(self.layout_changed)
-            layout.addWidget(grid)
-        else:
-            message = (
-                "이 모듈에는 스태미나를 소모해 파밍해야 하는 재료가 없습니다"
-                if self._material_scope == "stamina" and not materials
-                else "보유 재료가 이 모듈을 충족합니다"
-            )
-            layout.addWidget(_muted_label(message, card))
-        allocated = [
-            f"{material.name} × {row.allocated_owned:,}"
-            for material in materials
-            for row in rows
-            if material.item_id == row.item_id and row.allocated_owned
-        ]
-        if allocated:
-            layout.addWidget(_muted_label("기존 분배:" + "；".join(allocated), card))
-        runs = stamina_runs_text(stamina)
-        if runs:
-            layout.addWidget(_muted_label(runs, card))
-        return card
-
-    def _toggle_result(
-        self,
-        line_id: str,
-        toggle: QToolButton,
-        content: QWidget,
-        expanded: bool,
-    ) -> None:
-        if expanded:
-            self._expanded_results.add(line_id)
-        else:
-            self._expanded_results.discard(line_id)
-        toggle.setArrowType(
-            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
-        )
-        content.setVisible(expanded)
-        self.layout_changed.emit()
-
     def copy_plan(self) -> None:
         plan = self._last_plan
         if plan is None:
@@ -693,8 +592,11 @@ class CultivationBatchContent(QWidget):
         QApplication.clipboard().setText("\n".join(lines))
 
     def reset_draft(self) -> None:
+        if self._history_binding is not None:
+            self._history_binding.reset()
         self._recalculate_timer.stop()
-        self._controller.invalidate()
+        self._prepare_timer.stop()
+        self._controller.invalidate(clear_preparation=True)
         self._has_calculated = False
         self._materials_dirty = False
         self._last_plan = None
@@ -714,7 +616,11 @@ class CultivationBatchContent(QWidget):
         self._set_result_message("캐릭터 목표를 선택한 후 캐릭터 간 합계를 계산합니다.")
 
     def close_controller(self) -> None:
+        self._recalculate_timer.stop()
+        self._prepare_timer.stop()
         self._controller.close()
+        if self._history_binding is not None:
+            self._history_binding.close()
 
     def _refresh_target_state(self) -> None:
         count = len(self._cards)
@@ -728,7 +634,10 @@ class CultivationBatchContent(QWidget):
         return next((card for card in self._cards if card.line_id == line_id), None)
 
     def _identity(self) -> object:
-        return self._context_identity() if self._context_identity is not None else None
+        try:
+            return self._context_identity() if self._context_identity is not None else None
+        except (OSError, RuntimeError):
+            return None
 
     def _set_result_message(self, text: str, *, error: bool = False) -> None:
         retired = self._clear_result()
@@ -758,32 +667,6 @@ def _identity_fields(identity: object) -> tuple[str, object, str]:
     if isinstance(identity, tuple) and len(identity) >= 3:
         return str(identity[0]), identity[1], str(identity[2])
     return "", identity, str(identity or "")
-
-
-def _ledger_index(
-    rows: tuple[CultivationMaterialSource, ...],
-) -> dict[tuple[str, int], tuple[CultivationMaterialSource, ...]]:
-    result: dict[tuple[str, int], list[CultivationMaterialSource]] = {}
-    for row in rows:
-        result.setdefault((row.line_id, row.section_index), []).append(row)
-    return {key: tuple(value) for key, value in result.items()}
-
-
-def _quantity(material: CultivationMaterial, quantity: int) -> CultivationMaterial:
-    return CultivationMaterial(
-        material.item_id,
-        material.name,
-        quantity,
-        material.quality,
-        material.icon_path,
-    )
-
-
-def _muted_label(text: str, parent: QWidget) -> QLabel:
-    label = QLabel(text, parent)
-    label.setWordWrap(True)
-    label.setStyleSheet(themed_style("color:#8b949e;font-size:11px"))
-    return label
 
 
 def _path(value: object) -> str | None:

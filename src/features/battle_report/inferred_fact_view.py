@@ -24,7 +24,7 @@ class BattleInferredFactLabel(QLabel):
             self.clear_facts()
             return
         self.setText(
-            "추론 사실 (기본적으로 이번 전투 계산에 사용, 각성 선택은 변경하지 않음):"
+            "추론 사실 (기본적으로 이번 전투 계산에 사용, 각성 선택은 변경하지 않음): "
             + "；".join(
                 f"캐릭터 {fact.character_id} · {fact.fact_value} · "
                 f"{fact.source_gameplay_effect_id} · 신뢰도 {fact.confidence}"

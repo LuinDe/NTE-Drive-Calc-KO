@@ -115,6 +115,20 @@ class CultivationBatchTargetCard(QFrame):
         self._set_fork_enabled(True)
         self._emit_changed()
 
+    def export_history_target(self) -> dict[str, object]:
+        from src.features.toolbox.cultivation_history_draft import capture_target
+
+        return capture_target(self, self.seed, self._fork_seed, self._skill_inputs, line_id=self.line_id)
+
+    def restore_history_target(self, target: dict[str, object]) -> None:
+        from src.features.toolbox.cultivation_history_draft import apply_target_values
+
+        apply_target_values(self, target, self._skill_inputs, _set_stages)
+        self._set_character_enabled(self.character_toggle.isChecked())
+        self._set_skills_enabled(self.skills_toggle.isChecked())
+        self._set_fork_enabled(self.fork_toggle.isChecked())
+        self._refresh_summary()
+
     def _apply_style(self, expanded: bool) -> None:
         border = "#58a6ff" if expanded else "#30363d"
         self.setStyleSheet(themed_style(
@@ -534,13 +548,13 @@ def _stages_for_level(level: int) -> tuple[int, ...]:
 def _set_stages(combo: QComboBox, level: int, preferred: object) -> None:
     options = _stages_for_level(level)
     previous = int(preferred) if preferred is not None else None
-    combo.blockSignals(True)
+    blocked = combo.blockSignals(True)
     combo.clear()
     for stage in options:
         combo.addItem(f"돌파 {stage}", stage)
     selected = previous if previous in options else options[0]
     combo.setCurrentIndex(options.index(selected))
-    combo.blockSignals(False)
+    combo.blockSignals(blocked)
 
 
 __all__ = ["CultivationBatchTargetCard"]

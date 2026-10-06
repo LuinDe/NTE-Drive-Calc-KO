@@ -1,7 +1,8 @@
 # 生成拼图填充和装备组合候选。
 """Shape combination generation used before board placement solving."""
 
-from typing import List, Dict
+from concurrent.futures import CancelledError
+from typing import Callable, List, Dict
 from src.models.equipment import DriveShape
 
 class PuzzleCombinatorics:
@@ -14,11 +15,14 @@ class PuzzleCombinatorics:
         self,
         set_shapes: List[str],
         extra_label: str,
+        *,
+        only_max_extra: bool = True,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> List[List[str]]:
         """生成填满底盘的驱动组合。
 
-        额外形状是组合择优条件，而非硬性限制：无套装和二件套均可用
-        其他形状补足无法整除的格位。
+        四件套、无效果只返回理论最大额外形状件数；二件套可保留
+        较低件数层，供后续按真实库存和暴击约束回退。
         """
         set_area = sum(self.shapes_db[shape_id].area for shape_id in set_shapes)
         remain_area = 20 - set_area
@@ -31,6 +35,8 @@ class PuzzleCombinatorics:
         all_valid_combos = []
 
         def find_combinations(target_area: int, current_combo: List[str], start_idx: int):
+            if cancel_check is not None and cancel_check():
+                raise CancelledError("분배 청사진 조합이 취소되었습니다")
             if target_area == 0:
                 all_valid_combos.append(list(current_combo))
                 return
@@ -52,7 +58,13 @@ class PuzzleCombinatorics:
             combo_scores.append((extra_count, combo))
 
         max_extra_count = max(score[0] for score in combo_scores)
-        best_combos = [score[1] for score in combo_scores if score[0] == max_extra_count]
-        best_combos.sort(key=len)
+        best_combos = [
+            combo for count, combo in combo_scores
+            if not only_max_extra or count == max_extra_count
+        ]
+        best_combos.sort(key=lambda combo: (
+            -sum(self.shapes_db[shape].label == extra_label for shape in combo),
+            len(combo), combo,
+        ))
 
         return best_combos

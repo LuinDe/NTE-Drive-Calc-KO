@@ -363,7 +363,9 @@ class BattleReportAnalysisControllerMixin:
             self._page.show_analysis_detail_error(f"브레이크 귀속이 완료되지 않음: {message}")
         elif request.load.detail_level in {"hit", "buff"}:
             self._page.show_analysis_detail_error(f"현재 상세 정보가 완료되지 않음: {message}")
-        elif request.load.detail_level != "marginal":
+        elif request.load.detail_level == "marginal":
+            self._page.show_marginal_error(message)
+        else:
             self._page.clear_analysis(f"전투 리포트 히트별 분석 읽기 실패: {message}")
         log_event(
             "WARNING",

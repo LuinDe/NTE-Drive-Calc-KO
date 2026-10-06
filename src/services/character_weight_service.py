@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ def ensure_account_character_weights(
     character_ids: Iterable[int] | None = None,
     *,
     static_database_path: str | Path | None = None,
+    persist_defaults: bool = True,
 ) -> dict[int, dict[str, Any]]:
     """Refresh public defaults while preserving only genuine account edits.
 
@@ -56,9 +58,12 @@ def ensure_account_character_weights(
     refreshable ``default`` cache for untouched
     roles; saving a role changes its source to ``account`` and freezes it
     against later public-data updates.
+    Read-only editor requests resolve the same defaults with ``persist_defaults=False``
+    and never create or refresh an account cache as a side effect of opening a page.
     """
 
-    with StaticGameDataDao(static_database_path) as static_dao, UserDataDao(user_database_path) as user_dao:
+    with (StaticGameDataDao(static_database_path) as static_dao, UserDataDao(user_database_path) as user_dao,
+          user_dao.read_consistent_state() if not persist_defaults else nullcontext()):
         wanted_ids = (
             [int(character_id) for character_id in character_ids]
             if character_ids is not None
@@ -82,6 +87,15 @@ def ensure_account_character_weights(
             if not properties:
                 continue
             existing = user_dao.get_character_weight_preferences(character_id)
+            if not persist_defaults and (existing is None or is_unmodified_account_weight_cache(existing)):
+                # An editor read resolves defaults, but must not become a late account write.
+                result[character_id] = {
+                    "source_kind": "default", "source_dataset_id": public_revision,
+                    "properties": properties,
+                    "property_weights": {str(row["property_id"]): float(row["weight"]) for row in properties if float(row.get("weight") or 0) > 0},
+                    "main_property_weights": {str(row["property_id"]): float(row["main_weight"]) for row in properties if float(row.get("main_weight") or 0) > 0},
+                }
+                continue
             if existing is None:
                 result[character_id] = user_dao.seed_character_weight_preferences(
                     character_id,

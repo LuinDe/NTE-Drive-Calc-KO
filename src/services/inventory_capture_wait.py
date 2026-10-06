@@ -10,7 +10,12 @@ from src.integrations.operation_guard import require_operation
 
 
 class InventorySyncCancelled(Exception):
-    pass
+    def __init__(self, message='', *, reason='operation_cancelled'):
+        super().__init__(message)
+        self.reason = reason if reason in {
+            'connection_lost', 'stop_requested', 'context_changed', 'permission_revoked',
+            'battle_requested', 'maintenance', 'operation_cancelled',
+        } else 'operation_cancelled'
 
 
 class CaptureStartError(RuntimeError):

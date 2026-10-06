@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -125,6 +127,7 @@ def _show_replacement_optimizer(
     target: dict,
     *,
     context_key: str = "saved",
+    status_label: QLabel | None = None,
 ) -> None:
     """Open the shared replacement controller from the role page."""
 
@@ -151,7 +154,35 @@ def _show_replacement_optimizer(
     options = {"on_saved": refresh_after_save}
     if context_key != "saved":
         options["context_key"] = context_key
-    show_official_role_replacement(window, detail, target, **options)
+    if detail.get("replacement_candidates_loaded", True):
+        show_official_role_replacement(window, detail, target, **options)
+        return
+    from .role_shell import _role_controller
+    from .dependencies import OfficialRoleDependencies
+    controller = _role_controller(window)
+    if status_label is not None:
+        status_label.setText("교체 후보를 준비하는 중…")
+        status_label.show()
+
+        def clear_status() -> None:
+            if isValid(status_label):
+                status_label.hide()
+
+        controller.when_reads_idle(clear_status)
+
+    def prepared(result) -> None:
+        enriched, candidates = result
+        if controller.dependencies != OfficialRoleDependencies.from_app_context(window.app_context):
+            return
+        if (getattr(window, "_current_official_role_id", None) != int(detail["character"]["character_id"])
+                or not window._official_role_page.isVisible()):
+            return
+        show_official_role_replacement(window, enriched, target, prepared_candidates=candidates, **options)
+
+    controller.request_replacement(
+        detail, context_key, target, prepared,
+        lambda error: QMessageBox.warning(window, "교체 후보 준비 실패", error),
+    )
 
 
 def _refresh_role_page_after_replacement(
@@ -202,6 +233,9 @@ def _build_equipment_cards_group(
     group.setObjectName("officialRoleEquipmentCards")
     layout = QVBoxLayout(group)
     layout.setSpacing(8)
+    status = QLabel(group)
+    status.hide()
+    layout.addWidget(status)
     if context_key == "theory":
         layout.addWidget(QLabel(
             "공식 추천 메인 속성:" + (
@@ -268,7 +302,7 @@ def _build_equipment_cards_group(
             ):
                 replacement_callback = (
                     lambda target=dict(item), key=context_key: _show_replacement_optimizer(
-                        window, detail, target, context_key=key,
+                        window, detail, target, context_key=key, status_label=status,
                     )
                 )
             gain = calculate_official_role_item_gain(detail, context_key, item)

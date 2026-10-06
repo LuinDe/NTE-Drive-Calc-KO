@@ -11,6 +11,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Iterable, NoReturn
 
+import tempfile
+import threading
 from src.domain.recommended_weights import workshop_weight_source_ids
 from .static_game_data_metadata import (
     MINIMUM_SUPPORTED_SCHEMA_VERSION,
@@ -25,6 +27,40 @@ _ROLE_TEMPLATE_CLASSIFICATIONS = {
     "scheduled_character",
     "playable",
 }
+
+_SHARED_STATIC_CONNECTIONS: dict[str, sqlite3.Connection] = {}
+_SHARED_STATIC_LOCK = threading.Lock()
+
+
+def _is_temp_path(path: Path) -> bool:
+    """Check if the given path resides within temporary directories."""
+    try:
+        resolved = path.resolve()
+        temp_dir = Path(tempfile.gettempdir()).resolve()
+        if temp_dir in resolved.parents:
+            return True
+        parts = {p.lower() for p in resolved.parts}
+        if parts & {"tmp", "temp", ".tmp", "pytest"}:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _configure_static_connection(connection: sqlite3.Connection) -> None:
+    """Apply standard PRAGMAs for high-performance read-only static access."""
+    connection.row_factory = sqlite3.Row
+    for pragma in (
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA cache_size=-32000",
+        "PRAGMA mmap_size=268435456",
+        "PRAGMA temp_store=MEMORY",
+    ):
+        try:
+            connection.execute(pragma)
+        except sqlite3.Error:
+            pass
+
 
 class StaticGameDataError(RuntimeError):
     """静态数据库缺失或版本不兼容。"""
@@ -97,6 +133,9 @@ from src.storage.sqlite.static_game_data_progression_queries import (
 from src.storage.sqlite.static_game_data_skill_damage_queries import (
     StaticGameDataSkillDamageQueriesMixin,
 )
+from src.storage.sqlite.static_game_data_equipment_queries import (
+    StaticGameDataEquipmentQueriesMixin,
+)
 
 
 class StaticGameDataDao(
@@ -107,10 +146,11 @@ class StaticGameDataDao(
     StaticGameDataCombatBlueprintQueriesMixin,
     StaticGameDataSkillDamageQueriesMixin,
     StaticGameDataExtendedQueriesMixin,
+    StaticGameDataEquipmentQueriesMixin,
 ):
     """面向当前发行静态数据库 schema 的轻量查询边界。
 
-    连接始终使用 SQLite 只读模式，避免界面或计算代码意外修改开发者生成的数据包。
+    连接始终使用 SQLite 只读模式，并在多次查询间复用连接以消除系统调用开销。
     """
 
     def __init__(
@@ -118,6 +158,7 @@ class StaticGameDataDao(
         database_path: str | Path | None = None,
         *,
         expected_schema_version: int | None = None,
+        reuse_connection: bool | None = None,
     ) -> None:
         expected_version = (
             int(expected_schema_version)
@@ -128,35 +169,63 @@ class StaticGameDataDao(
             raise ValueError("expected_schema_version은 양의 정수여야 합니다")
         self._schema_version = SCHEMA_VERSION
         self.database_path = resolve_static_database(database_path)
-        uri = f"{self.database_path.as_uri()}?mode=ro"
-        try:
-            self._connection: sqlite3.Connection | None = sqlite3.connect(
-                uri,
-                uri=True,
-            )
-        except sqlite3.Error as exc:
-            raise StaticGameDataError(
-                f"정적 데이터베이스를 열 수 없습니다: {self.database_path}"
-            ) from exc
-        self._connection.row_factory = sqlite3.Row
+        norm_key = os.path.normcase(str(self.database_path))
+
+        if reuse_connection is None:
+            self._reuse_connection = not _is_temp_path(self.database_path)
+        else:
+            self._reuse_connection = bool(reuse_connection)
+
+        self._connection: sqlite3.Connection | None = None
+        if self._reuse_connection:
+            with _SHARED_STATIC_LOCK:
+                existing = _SHARED_STATIC_CONNECTIONS.get(norm_key)
+                if existing is not None:
+                    try:
+                        existing.execute("SELECT 1")
+                        self._connection = existing
+                    except sqlite3.Error:
+                        _SHARED_STATIC_CONNECTIONS.pop(norm_key, None)
+                        existing = None
+                if self._connection is None:
+                    uri = f"{self.database_path.as_uri()}?mode=ro"
+                    try:
+                        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+                    except sqlite3.Error as exc:
+                        raise StaticGameDataError(
+                            f"정적 데이터베이스를 열 수 없습니다: {self.database_path}"
+                        ) from exc
+                    _configure_static_connection(conn)
+                    _SHARED_STATIC_CONNECTIONS[norm_key] = conn
+                    self._connection = conn
+        else:
+            uri = f"{self.database_path.as_uri()}?mode=ro"
+            try:
+                self._connection = sqlite3.connect(uri, uri=True)
+            except sqlite3.Error as exc:
+                raise StaticGameDataError(
+                    f"정적 데이터베이스를 열 수 없습니다: {self.database_path}"
+                ) from exc
+            _configure_static_connection(self._connection)
+
         try:
             version_row = self._connection.execute(
                 "SELECT MAX(version) AS version FROM schema_migration"
             ).fetchone()
         except sqlite3.Error as exc:
-            self.close()
+            self.close(force=True)
             raise StaticGameDataError("파일이 NTE 정적 게임 데이터베이스가 아닙니다") from exc
         version = version_row["version"] if version_row is not None else None
         resolved_version = int(version or 0)
         if expected_version is not None and resolved_version != expected_version:
-            self.close()
+            self.close(force=True)
             raise StaticGameDataError(
                 f"지원하지 않는 정적 데이터베이스 구조 버전: {version!r}; {expected_version}이 필요합니다"
             )
         if expected_version is None and resolved_version not in range(
             MINIMUM_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION + 1,
         ):
-            self.close()
+            self.close(force=True)
             raise StaticGameDataError(
                 f"지원하지 않는 정적 데이터베이스 구조 버전: {version!r}; 지원 버전 "
                 f"{MINIMUM_SUPPORTED_SCHEMA_VERSION}~{SCHEMA_VERSION}"
@@ -174,11 +243,41 @@ class StaticGameDataDao(
     ) -> None:
         self.close()
 
-    def close(self) -> None:
+    def close(self, *, force: bool = False) -> None:
         connection = getattr(self, "_connection", None)
-        if connection is not None:
-            connection.close()
+        if connection is None:
+            return
+        if self._reuse_connection and not force:
             self._connection = None
+            return
+        norm_key = os.path.normcase(str(self.database_path))
+        with _SHARED_STATIC_LOCK:
+            _SHARED_STATIC_CONNECTIONS.pop(norm_key, None)
+        try:
+            connection.close()
+        except sqlite3.Error:
+            pass
+        self._connection = None
+
+    @classmethod
+    def close_shared_connections(cls, database_path: str | Path | None = None) -> None:
+        """Close shared static database connections across the process."""
+        with _SHARED_STATIC_LOCK:
+            if database_path is not None:
+                norm_key = os.path.normcase(str(Path(database_path).expanduser().resolve()))
+                conn = _SHARED_STATIC_CONNECTIONS.pop(norm_key, None)
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except sqlite3.Error:
+                        pass
+            else:
+                for conn in _SHARED_STATIC_CONNECTIONS.values():
+                    try:
+                        conn.close()
+                    except sqlite3.Error:
+                        pass
+                _SHARED_STATIC_CONNECTIONS.clear()
 
     def _rows(self, sql: str, parameters: Iterable[Any] = ()) -> list[dict[str, Any]]:
         if self._connection is None:
@@ -656,128 +755,3 @@ class StaticGameDataDao(
 
     def get_suit(self, suit_id: str) -> dict[str, Any] | None:
         return next((suit for suit in self.list_suits() if suit["suit_id"] == suit_id), None)
-
-    def list_equipment_attributes(self) -> list[dict[str, Any]]:
-        """返回可用于装备词条、核心筛选和官方蓝图的属性 ID。"""
-
-        rows = self._rows(
-            """
-            SELECT attribute_id, display_name_zh, filter_name_zh,
-                   random_attribute_name_zh, attribute_type, show_percent,
-                   show_outside, show_inside, score, icon_path, source_row_id
-            FROM equipment_attribute
-            ORDER BY attribute_id
-            """
-        )
-        for row in rows:
-            for field in ("show_percent", "show_outside", "show_inside"):
-                row[field] = bool(row[field])
-        return rows
-
-    def get_equipment_attribute(self, attribute_id: str) -> dict[str, Any] | None:
-        """按官方属性 ID 查询装备属性定义。"""
-
-        raw_attribute_id = str(attribute_id).strip()
-        if not raw_attribute_id:
-            raise ValueError("attribute_id는 비워 둘 수 없습니다")
-        return next(
-            (
-                attribute
-                for attribute in self.list_equipment_attributes()
-                if attribute["attribute_id"] == raw_attribute_id
-            ),
-            None,
-        )
-
-    def list_equipment_items(self, kind: str | None = None) -> list[dict[str, Any]]:
-        if kind not in (None, "module", "core"):
-            raise ValueError("equipment kind must be 'module', 'core', or None")
-        where = "" if kind is None else "WHERE kind = ?"
-        parameters = () if kind is None else (kind,)
-        rows = self._rows(
-            f"""
-            SELECT item_id, kind, quality, name_zh, name_text_table, name_text_key,
-                   geometry_id, geometry_enum, grid_count, suit_id, suit_type_enum,
-                   max_level, random_base_attribute_pool_id,
-                   random_base_attribute_count, random_sub_attribute_pool_id,
-                   random_sub_attribute_count, random_sub_attribute_max_count,
-                   strength_pack_id, icon_path, plan_icon_path, is_guide_item,
-                   source_row_id
-            FROM equipment_item
-            {where}
-            ORDER BY item_id
-            """,
-            parameters,
-        )
-        for row in rows:
-            row["is_guide_item"] = bool(row["is_guide_item"])
-        return rows
-
-    def get_equipment_item(self, item_id: str) -> dict[str, Any] | None:
-        """按游戏官方物品 ID 返回一条装备模板。"""
-
-        raw_item_id = str(item_id).strip()
-        if not raw_item_id:
-            raise ValueError("item_id는 비워 둘 수 없습니다")
-        return next(
-            (
-                item
-                for item in self.list_equipment_items()
-                if item["item_id"] == raw_item_id
-            ),
-            None,
-        )
-
-    def evaluate_equipment_base_attribute_curve(
-        self,
-        curve_id: str,
-        level: float,
-    ) -> float | None:
-        """按官方插值模式读取装备主属性在指定等级的数值。"""
-
-        curve = self._one(
-            """
-            SELECT interpolation_mode, default_value
-            FROM equipment_base_attribute_curve
-            WHERE curve_id = ?
-            """,
-            (str(curve_id),),
-        )
-        if curve is None:
-            return None
-        points = self._rows(
-            """
-            SELECT level, value
-            FROM equipment_base_attribute_point
-            WHERE curve_id = ?
-            ORDER BY level
-            """,
-            (str(curve_id),),
-        )
-        if not points:
-            default_value = curve.get("default_value")
-            return None if default_value is None else float(default_value)
-
-        target = float(level)
-        if target <= float(points[0]["level"]):
-            return float(points[0]["value"])
-        if target >= float(points[-1]["level"]):
-            return float(points[-1]["value"])
-
-        previous = points[0]
-        for current in points[1:]:
-            current_level = float(current["level"])
-            if target > current_level:
-                previous = current
-                continue
-            if str(curve.get("interpolation_mode") or "") == "RCIM_Constant":
-                return float(previous["value"])
-            previous_level = float(previous["level"])
-            span = current_level - previous_level
-            if span <= 0:
-                return float(current["value"])
-            ratio = (target - previous_level) / span
-            return float(previous["value"]) + (
-                float(current["value"]) - float(previous["value"])
-            ) * ratio
-        return float(points[-1]["value"])

@@ -4,10 +4,20 @@ from __future__ import annotations
 from time import monotonic
 
 from src.integrations.nte_core_protocol import NteCoreProtocolError
+from src.integrations.native_inventory_snapshot import NativeSnapshotPending
 
 
 CHANGES_CAPABILITY = "snapshot.changes.v1"
 CHANGE_SETTLE_SECONDS = 0.25
+
+
+def require_current_sync_revision(snapshot, status):
+    domain = snapshot["domain"]
+    expected = tuple(snapshot[key] for key in ("providerId", "domainKey", "revision"))
+    row = domain_status(status, domain)
+    if (snapshot_change_key(status, domain) != expected or row.get("ready") is not True
+            or row.get("dirty") is not False or row.get("enabled") is not True):
+        raise NativeSnapshotPending("동기화 읽기 중 소스가 변경되어 재수집을 대기 중입니다.")
 
 
 def domain_status(status, domain):

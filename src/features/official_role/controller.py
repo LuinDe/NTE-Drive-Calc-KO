@@ -4,9 +4,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from collections import OrderedDict
+from copy import deepcopy
 from time import perf_counter
 from typing import Any
 
+from PySide6.QtCore import QObject, Qt, Signal
+
+from src.app.page_tasks import PageCommitLane, PageRequest, PageTaskLane
 from src.features.official_role.dependencies import OfficialRoleDependencies
 from src.observability.context import OperationContext
 from src.observability.operation import log_event, operation_scope
@@ -24,19 +29,160 @@ from src.services.world_bonus_settings_service import (
     WorldBonusSettings,
     WorldBonusSettingsService,
 )
+from src.services.official_role_inventory_contexts import load_role_replacement_detail
+from src.services.official_role_replacement_service import replacement_candidates_for_official_role
+from src.services.workshop_weight_template_service import configured_workshop_weight_template_file
+from src.integrations.bundled_resources import bundled_config_dir
 
 
-class OfficialRoleController:
+class OfficialRoleController(QObject):
     """Expose account-pinned role operations to the Qt page."""
 
-    def __init__(self, dependencies: OfficialRoleDependencies) -> None:
+    changed = Signal()
+
+    def __init__(self, dependencies: OfficialRoleDependencies, parent: QObject | None = None) -> None:
+        super().__init__(parent)
         self.dependencies = dependencies
+        self._reads = PageTaskLane(self)
+        self._writes = PageCommitLane(self)
+        self._closed = False
+        self._cache_key = None
+        self._request_cache: dict[object, Any] = {}
+        self._details: OrderedDict[int, dict] = OrderedDict()
+        self._index_model = None
+        self._epoch = 0
         self._profile_service = OfficialRoleProfileService(
             dependencies.user_database_path
         )
         self._world_bonus_service = WorldBonusSettingsService(
             dependencies.user_database_path
         )
+
+    def is_writing(self) -> bool:
+        return self._writes.is_running()
+
+    def submit_change(self, work, committed, failed, application_failed) -> bool:
+        if self._closed or self.is_writing():
+            return False
+        self._epoch += 1
+        self._reads.cancel()
+
+        def done(value):
+            self._cache_key = None
+            self.changed.emit()
+            committed(value)
+
+        return self._writes.submit(work, done, failed, application_failed)
+
+    def when_commit_settled(self, callback) -> None:
+        self._writes.settled.connect(callback, Qt.ConnectionType.SingleShotConnection)
+
+    def cancel_reads(self) -> None:
+        self._reads.cancel()
+
+    def source_key(self) -> tuple:
+        """Conservative file probes; scoped to the frozen account and resource identity."""
+        def stamp(path):
+            try:
+                info = path.stat()
+                return info.st_ino, info.st_size, info.st_mtime_ns
+            except OSError:
+                return None
+
+        paths = (self.dependencies.user_database_path, self.dependencies.static_database_path,
+                 self.dependencies.shared_database_path)
+        template = configured_workshop_weight_template_file()
+        return (self.dependencies, tuple((stamp(path), stamp(path.with_name(path.name + "-wal"))) for path in paths),
+                stamp(self.dependencies.asset_root / "manifest.json") if self.dependencies.asset_root else None,
+                stamp(template) if template is not None else None,
+                stamp(bundled_config_dir() / "gameplay_effect_semantics.json"))
+
+    def _prepare_cache(self) -> None:
+        key = self.source_key()
+        if key != self._cache_key:
+            self._cache_key = key
+            self._request_cache = {}
+            self._details.clear()
+            self._index_model = None
+
+    def _stable_read(self, read):
+        # File probing belongs on the worker too: stat() can block on slow drives.
+        for _attempt in range(2):
+            self._prepare_cache()
+            before = self._cache_key
+            result = read()
+            if self.source_key() == before:
+                return result, before
+            self._cache_key = None
+        raise ValueError("캐릭터 자료를 업데이트하는 중입니다. 잠시 후 캐릭터 페이지에 다시 들어가세요.")
+
+    def request_index(self, apply, failed) -> None:
+        if self._closed or self.is_writing():
+            return
+        def read():
+            def model():
+                if self._index_model is None:
+                    self._index_model = self.load_index(), self.load_world_bonus()
+                return self._index_model
+            (roles, settings), key = self._stable_read(model)
+            return deepcopy(roles), settings, key
+        self._reads.submit(PageRequest(("index", self.dependencies, self._epoch), read, apply, failed))
+
+    def request_detail(self, character_id: int, apply, failed, discarded=lambda: None) -> None:
+        if self._closed or self.is_writing():
+            discarded()
+            return
+        def read():
+            def model():
+                if character_id not in self._details:
+                    self._details[character_id] = self.load_detail(character_id, include_replacement_candidates=False)
+                self._details.move_to_end(character_id)
+                while len(self._details) > 8:
+                    self._details.popitem(last=False)
+                return deepcopy(self._details[character_id])
+            return self._stable_read(model)
+        self._reads.submit(PageRequest(("detail", character_id, self.dependencies, self._epoch), read, apply, failed, discarded))
+
+    def is_loading(self) -> bool:
+        return self._reads.is_running()
+
+    def request_replacement(self, detail, context_key, target, apply, failed) -> None:
+        """Prepare a selected snapshot and rank it off the UI thread, without saving."""
+        frozen_detail, frozen_target = deepcopy(detail), deepcopy(target)
+        def read():
+            source_key = self.source_key()
+            if detail.get("_view_source_key", source_key) != source_key:
+                raise ValueError("캐릭터 또는 장비 세팅 자료가 업데이트되었습니다. 다시 불러온 뒤 교체를 선택하세요.")
+            enriched = load_role_replacement_detail(
+                self.dependencies.user_database_path, self.dependencies.static_database_path,
+                self.dependencies.asset_root, frozen_detail, context_key,
+            )
+            candidates = replacement_candidates_for_official_role(enriched, context_key, frozen_target)
+            if self.source_key() != source_key:
+                raise ValueError("캐릭터 또는 장비 세팅 자료를 업데이트하는 중입니다. 다시 불러온 뒤 교체를 선택하세요.")
+            return enriched, candidates
+
+        key = ("replacement", int(detail["character"]["character_id"]), context_key,
+               target.get("uid_serial"), target.get("uid_slot"), self._epoch)
+        self._reads.submit(PageRequest(key, read, apply, failed))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._reads.close()
+        if self._reads.is_running():
+            self._reads.idle.connect(self._release_cache, Qt.ConnectionType.SingleShotConnection)
+        else:
+            self._release_cache()
+
+    def _release_cache(self) -> None:
+        self._request_cache.clear()
+        self._details.clear()
+        self._index_model = None
+
+    def when_reads_idle(self, callback) -> None:
+        self._reads.idle.connect(callback, Qt.ConnectionType.SingleShotConnection)
 
     def _operation(self, job_id: int | str | None = None) -> OperationContext:
         return OperationContext.create(
@@ -69,7 +215,8 @@ class OfficialRoleController:
             )
             return roles
 
-    def load_detail(self, character_id: int) -> dict:
+    def load_detail(self, character_id: int, *, include_replacement_candidates: bool = True) -> dict:
+        self._prepare_cache()
         with operation_scope(
             self._operation(character_id),
             started_event="role.detail_load_started",
@@ -84,6 +231,8 @@ class OfficialRoleController:
                 static_database_path=self.dependencies.static_database_path,
                 asset_root=self.dependencies.asset_root,
                 shared_database_path=self.dependencies.shared_database_path,
+                request_cache=self._request_cache,
+                include_replacement_candidates=include_replacement_candidates,
             )
 
     def save_profiles(

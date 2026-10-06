@@ -11,10 +11,13 @@ from src.services.native_plugin_deployment import PluginDeploymentPendingCleanup
 from src.services.native_plugin_deployment import deploy_native_plugin
 from src.services.mod_plugin_loading_service import ModPluginLoadingError, ModPluginLoadingWaiting
 from src.utils.logger import logger
+from src.integrations.legacy_game_proxy import ko_kept_note as _ko_kept_note
 
 
 def _deployment_error_hint(error: Exception) -> str:
     """Keep implementation errors out of the short user-facing dialog."""
+    if getattr(error, "foreign_game_file", False) or getattr(error.__cause__, "foreign_game_file", False):
+        return str(error)   # KO patch: name the game-folder file that was kept, not a generic hint
     logger.warning(f"컴포넌트 배포 미완료 kind={type(error).__name__}")
     if isinstance(error, PermissionError):
         return "컴포넌트 처리가 완료되지 않았습니다; 작업 모드와 게임 디렉터리 권한을 점검하고, 게임이 종료되었는지 확인하세요."
@@ -92,6 +95,18 @@ def _refresh_work_mode_detection(window) -> None:
         controller.component_state_changed()
 
 
+def _set_component_status(label, *, issues=(), ready=False, pending=False):
+    if pending:
+        label.setText("Loader 작업 공간 대조가 완료되지 않았습니다; 검사 상세를 확인하세요.")
+        label.setToolTip("")
+    elif ready:
+        label.setText("컴포넌트가 준비되었습니다. 게임을 시작하면 연결과 사용 가능한 기능을 자동으로 확인합니다.")
+        label.setToolTip("")
+    else:
+        label.setText(f"컴포넌트가 준비되지 않았습니다({len(issues)}개 항목); 검사 상세 정보를 확인하세요.")
+        label.setToolTip("\n".join(str(issue) for issue in issues))
+
+
 def refresh_native_plugin_status(window) -> None:
     bundle = inspect_game_component_bundle(window.app_context.paths.root)
     combo = getattr(window, "_equipment_plugin_loading_method_combo", None)
@@ -116,15 +131,14 @@ def refresh_native_plugin_status(window) -> None:
     label = getattr(window, "_equipment_plugin_status_label", None)
     if label is not None:
         if not bundle.ready:
-            label.setText("컴포넌트가 준비되지 않았습니다:" + "；".join(bundle.issues))
+            _set_component_status(label, issues=bundle.issues)
         elif combo is not None and combo.currentData() == "loader":
             try:
                 service = window._mod_plugin_loading_service
                 workspace = service.inspect_native_workspace()
-                label.setText("컴포넌트가 준비되었습니다. 게임을 시작하면 연결과 사용 가능한 기능을 자동으로 확인합니다."
-                              if workspace.files_compatible else "컴포넌트가 준비되지 않았습니다:" + "；".join(workspace.issues))
+                _set_component_status(label, ready=workspace.files_compatible, issues=workspace.issues)
             except (EquipmentPluginDeploymentError, ModPluginLoadingError):
-                label.setText("Loader 작업 공간 대조가 완료되지 않았습니다; 검사 상세를 확인하세요.")
+                _set_component_status(label, pending=True)
         else:
             result = inspect_deployed_native_plugin(
                 application_root=window.app_context.paths.root,
@@ -132,8 +146,7 @@ def refresh_native_plugin_status(window) -> None:
                 recorded_files=window.work_mode_service.deployment_record.get("managed_files", {}),
                 bundle_inspection=bundle,
             )
-            label.setText("컴포넌트가 준비되었습니다. 게임을 시작하면 연결과 사용 가능한 기능을 자동으로 확인합니다."
-                          if result.files_compatible else "컴포넌트가 준비되지 않았습니다:" + "；".join(result.issues))
+            _set_component_status(label, ready=result.files_compatible, issues=result.issues)
 
 
 def _confirm_d3d_deployment(window) -> bool:
@@ -235,6 +248,7 @@ def deploy_native_plugin_from_settings(window) -> None:
                 game_executable_path=executable,
                 operation_guard=guard,
                 cleanup_legacy_proxy=True,
+                recorded_files=policy.deployment_record.get("managed_files") or {},
             )
 
         try:
@@ -245,7 +259,7 @@ def deploy_native_plugin_from_settings(window) -> None:
         runtime.save_deployment(deployed)
         window._refresh_equipment_plugin_status()
         _refresh_work_mode_detection(window)
-        QMessageBox.information(window, "네이티브 컴포넌트 배포 완료", "게임을 시작한 후 연결과 각 능력을 다시 검사하세요.")
+        QMessageBox.information(window, "네이티브 컴포넌트 배포 완료", ("게임을 시작한 후 연결과 각 능력을 다시 검사하세요.") + _ko_kept_note())
     except PluginDeploymentPendingCleanup as error:
         runtime.save_pending_deployment(error)
         _refresh_work_mode_detection(window)
@@ -268,7 +282,7 @@ def start_native_loader_from_settings(window) -> None:
         window._refresh_equipment_plugin_status()
         _refresh_work_mode_detection(window)
         QMessageBox.information(window, "네이티브 Loader 시작됨",
-                                "게임을 정상적으로 시작한 후 연결과 각 능력을 다시 검사하세요.")
+                                ("게임을 정상적으로 시작한 후 연결과 각 능력을 다시 검사하세요.") + _ko_kept_note())
     except ModPluginLoadingWaiting as error:
         window._refresh_equipment_plugin_status()
         QMessageBox.warning(

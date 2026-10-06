@@ -5,13 +5,22 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 
-from src.integrations.native_plugin_bundle import NATIVE_PLUGIN_DEPLOYMENT_PATHS, inspect_native_plugin_bundle
+from src.integrations.native_plugin_bundle import HOT_PLUGIN_LAYOUTS, NATIVE_PLUGIN_DEPLOYMENT_PATHS, inspect_native_plugin_bundle
 from src.services.native_plugin_deployment import NativeComponentFilesDeployment, deploy_native_component_files
 from src.integrations.operation_guard import require_operation
 from src.services.equipment_plugin_deployment import EquipmentPluginDeploymentError, game_process_running
 
 NATIVE_LOADER_COMPONENT_ROLES = ('capture_plugin',)
 NATIVE_LOADER_PAYLOAD_RELATIVE_PATH = NATIVE_PLUGIN_DEPLOYMENT_PATHS['capture_plugin']
+
+
+def native_loader_payload_relative(application_root) -> str:
+    bundle = inspect_native_plugin_bundle(application_root)
+    return 'd3d12.dll' if bundle.layout in HOT_PLUGIN_LAYOUTS else NATIVE_LOADER_PAYLOAD_RELATIVE_PATH
+
+
+def _roles(bundle) -> tuple[str, ...]:
+    return tuple(bundle.deployment_paths) if bundle.layout in HOT_PLUGIN_LAYOUTS else NATIVE_LOADER_COMPONENT_ROLES
 
 
 @dataclass(frozen=True)
@@ -30,8 +39,8 @@ def inspect_native_loader_workspace(*, application_root, workspace_path) -> Nati
     bundle = inspect_native_plugin_bundle(root)
     if not bundle.ready:
         return NativeLoaderWorkspaceInspection(directory, {}, tuple(bundle.issues))
-    expected = {NATIVE_PLUGIN_DEPLOYMENT_PATHS[role]: bundle.files[bundle.roles[role]]
-                for role in NATIVE_LOADER_COMPONENT_ROLES}
+    expected = {bundle.deployment_paths[role]: bundle.files[bundle.roles[role]]
+                for role in _roles(bundle)}
     issues = []
     for relative, digest in expected.items():
         target = directory / relative
@@ -57,5 +66,5 @@ def prepare_native_loader_workspace(*, application_root, workspace_path, operati
     return deploy_native_component_files(
         application_root=application_root, directory_path=workspace_path,
         operation_guard=operation_guard, game_running=game_running,
-        component_roles=NATIVE_LOADER_COMPONENT_ROLES,
+        component_roles=_roles(inspect_native_plugin_bundle(application_root)),
     )

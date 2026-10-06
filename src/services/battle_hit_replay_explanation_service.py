@@ -97,7 +97,7 @@ def _percent(value: float | None, *, signed: bool = False) -> str:
 def _factor_value(factor: BattleHitReplayFactor) -> str:
     if factor.factor_id.startswith("topple_character:"):
         return f"{factor.value:,.2f}"
-    if factor.factor_id == "skill" and "배율" in factor.label:
+    if factor.factor_id == "skill" and ("배율" in factor.label or "倍率" in factor.label):
         return f"{factor.value * 100:.3f}%"
     if factor.factor_id == "scaling":
         return f"{factor.value:,.3f}"
@@ -672,7 +672,7 @@ class BattleHitReplayExplanationService:
                 ))
         else:
             missing_target = any(
-                "단일 대상 방어 및 저항" in row
+                "단일 대상 방어·저항" in row
                 for row in replay.missing_evidence
             )
             if replay.formula_type.startswith("直伤") and missing_target:
@@ -703,7 +703,7 @@ class BattleHitReplayExplanationService:
         lines.append(
             "【이번 히트 Buff: 투영됨 (공식에 반영되었는지는 곱연산 구간 참조)】"
             if not any(
-                "단일 대상 방어 및 저항" in row
+                "단일 대상 방어·저항" in row
                 for row in replay.missing_evidence
             )
             else "【이번 히트 Buff: 투영 가능 (공식 입력 불완전)】"

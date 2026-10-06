@@ -98,9 +98,9 @@ class StaticCatalogMechanicsIdentityProvider:
                     return result
             values = self._values(raw)
             owner = queries.resolve_owner(
-                str(values.get("所有者类型") or ""),
-                str(values.get("所有者 ID") or ""),
-                str(values.get("效果定义 key") or ""),
+                str(values.get("소유자 유형") or ""),
+                str(values.get("소유자 ID") or ""),
+                str(values.get("효과 정의 key") or ""),
             )
         if owner is not None:
             name = self._clean_name(owner.get("display_name"))
@@ -122,7 +122,7 @@ class StaticCatalogMechanicsIdentityProvider:
         if cache_key in self._owner_cache:
             return self._owner_cache[cache_key]
         values = self._values(raw)
-        character_id = str(values.get("所属角色 ID") or "")
+        character_id = str(values.get("소속 캐릭터 ID") or "")
         if character_id and character_id not in {"—", "0"}:
             try:
                 term = self._terminology.resolve("character", character_id)
@@ -151,9 +151,9 @@ class StaticCatalogMechanicsIdentityProvider:
             return result
         with StaticCatalogMechanicsQueries(self._database_path) as queries:
             target = queries.resolve_owner(
-                str(values.get("所有者类型") or ""),
-                str(values.get("所有者 ID") or ""),
-                str(values.get("效果定义 key") or ""),
+                str(values.get("소유자 유형") or ""),
+                str(values.get("소유자 ID") or ""),
+                str(values.get("효과 정의 key") or ""),
             )
         if target is None:
             result = ("공통 메커니즘", None)

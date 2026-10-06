@@ -42,7 +42,7 @@ def build_feast_setup(
         value = project_option(category, option)
         display_category = value.display_label or category
         display_name = value.display_value or NAME_UNAVAILABLE
-        category_prefix = display_category.removesuffix("提升")
+        category_prefix = display_category.removesuffix(" 증가").removesuffix("提升")
         if display_name.startswith(f"{category_prefix} · "):
             display_name = display_name.removeprefix(f"{category_prefix} · ")
         grouped[(int(option["category_ordinal"]), display_category)].append(

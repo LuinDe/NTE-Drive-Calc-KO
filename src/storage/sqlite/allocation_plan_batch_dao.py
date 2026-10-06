@@ -5,10 +5,43 @@ from src.services.loadout_equipment_identity import source_snapshots_share_equip
 from src.services.virtual_equipment_service import is_virtual_equipment_assignment
 
 from .protocols import UserDataDaoMixinHost
-from .user_data_support import UserDataError, UserDataValidationError, _integer
+from .loadout_comparison_guard import assert_comparison_baseline
+from .user_data_support import UserDataError, UserDataValidationError, _integer, _utc_now
 
 
 class AllocationPlanBatchDaoMixin(UserDataDaoMixinHost):
+    def _create_calculated_slot_in_transaction(self, character_id, name):
+        """Create the first visible slot only inside the calculated-plan transaction."""
+        connection = self._db()
+        rows = connection.execute(
+            "SELECT slot_key, is_archived, sort_order FROM role_loadout_slot "
+            "WHERE character_id = ?", (character_id,),
+        ).fetchall()
+        if any(not row[1] for row in rows):
+            raise UserDataValidationError("대상 장비 세팅 슬롯이 변경되었습니다. 다시 선택하세요")
+        keys = {str(row[0]) for row in rows}
+        if "primary" not in keys:
+            key = "primary"
+        else:
+            number = 1
+            while f"slot-{number}" in keys:
+                number += 1
+            key = f"slot-{number}"
+        now = _utc_now()
+        cursor = connection.execute(
+            "INSERT INTO role_loadout_slot("
+            "character_id, slot_key, slot_name, sort_order, current_plan_id, "
+            "is_archived, created_at_utc, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, NULL, 0, ?, ?)",
+            (
+                character_id, key, self._normalize_slot_name(name),
+                max((int(row[2]) for row in rows), default=-1) + 1, now, now,
+            ),
+        )
+        if cursor.lastrowid is None:
+            raise UserDataError("대상 장비 세팅 슬롯 생성 후 slot_id가 반환되지 않았습니다")
+        return int(cursor.lastrowid)
+
     def save_calculated_loadout_plans(self, plans, *, checkpoint, validate=None):
         """Persist targets and release other current owners in one transaction."""
         if not plans:
@@ -22,14 +55,27 @@ class AllocationPlanBatchDaoMixin(UserDataDaoMixinHost):
             if validate is not None:
                 validate()
             slots, claims, summaries = {}, {}, {}
+            resolved_plans = []
+            created_slots = set()
             inventory_kinds = {}
-            for row in plans:
+            for source in plans:
+                row = dict(source)
+                if row.get("slot_id") is None:
+                    name = row.get("create_slot_name")
+                    if name is None:
+                        raise UserDataValidationError("새 장비 세팅 슬롯에 캐릭터 이름이 없습니다")
+                    row["slot_id"] = self._create_calculated_slot_in_transaction(
+                        _integer(row["character_id"], "character_id", minimum=1), name,
+                    )
+                    created_slots.add(int(row["slot_id"]))
                 slot_id = _integer(row.get("slot_id"), "slot_id", minimum=1)
                 slot = self.get_loadout_slot(slot_id)
                 if (slot is None or slot["is_archived"] or slot_id in slots
                         or int(slot["character_id"]) != int(row["character_id"])):
                     raise UserDataValidationError("계산 방안의 대상 슬롯이 유효하지 않거나 중복됩니다")
                 slots[slot_id] = slot
+                assert_comparison_baseline(self, slot_id, row.get("comparison_baseline"))
+                resolved_plans.append(row)
                 self.assert_loadout_slot_save_allowed(
                     slot_id, row["assignments"], source_snapshot_id=row["source_snapshot_id"],
                 )
@@ -106,14 +152,14 @@ class AllocationPlanBatchDaoMixin(UserDataDaoMixinHost):
                     connection.execute("UPDATE loadout_plan SET is_active = 1 WHERE plan_id = ?", (current_id,))
 
             result = []
-            for row in plans:
+            for row in resolved_plans:
                 checkpoint()
                 slot_id = int(row["slot_id"])
                 arguments = {key: row[key] for key in (
                     "name", "character_id", "assignments", "source_snapshot_id", "status", "score", "payload",
                 )}
                 plan_id = self.save_loadout_plan(**arguments, slot_id=slot_id, is_active=False)
-                if slots[slot_id]["slot_key"] == "primary":
+                if slots[slot_id]["slot_key"] == "primary" or slot_id in created_slots:
                     connection.execute("UPDATE loadout_plan SET is_active = 0 WHERE character_id = ?", (row["character_id"],))
                     connection.execute("UPDATE loadout_plan SET is_active = 1 WHERE plan_id = ?", (plan_id,))
                 result.append(plan_id)

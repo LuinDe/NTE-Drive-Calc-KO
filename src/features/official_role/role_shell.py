@@ -3,14 +3,16 @@
 
 from __future__ import annotations
 
+from time import perf_counter
+
 from PySide6.QtCore import QTimer
+from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QHBoxLayout,
     QFrame,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -22,11 +24,14 @@ from PySide6.QtWidgets import (
 from src.app.theme import themed_style
 from src.features.official_role.controller import OfficialRoleController
 from src.features.official_role.dependencies import OfficialRoleDependencies
+from src.features.official_role.sync_controller import RoleSyncResultText
 from src.services.official_role_profile_service import (
     OfficialRoleProfileUpdate,
 )
 from src.services.world_bonus_settings_service import WorldBonusSettings
 from src.ui.persistent_tab_order import bind_persistent_tab_order
+from src.utils.logger import logger
+from src.utils.perf import log_perf
 from src.ui.widgets import (
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
@@ -86,7 +91,8 @@ def _set_world_bonus_controls(window, settings: WorldBonusSettings) -> None:
 
 
 def _build_world_bonus_card(window) -> QFrame:
-    settings = _role_controller(window).load_world_bonus()
+    # Persisted values are loaded together with the index, never during UI construction.
+    settings = WorldBonusSettings()
     card = QFrame()
     card.setObjectName("officialRoleWorldBonusCard")
     card.setFixedHeight(35)
@@ -127,6 +133,8 @@ def _build_world_bonus_card(window) -> QFrame:
     window.official_role_world_attack = attack
     window.official_role_world_crit_damage = crit_damage
     _set_world_bonus_controls(window, settings)
+    attack.setEnabled(False)
+    crit_damage.setEnabled(False)
     attack.valueChanged.connect(lambda _value: _mark_world_bonus_dirty(window))
     crit_damage.valueChanged.connect(
         lambda _value: _mark_world_bonus_dirty(window)
@@ -139,61 +147,183 @@ def _role_controller(window) -> OfficialRoleController:
     controller = getattr(window, "_official_role_controller", None)
     if (
         not isinstance(controller, OfficialRoleController)
+        or controller._closed
         or controller.dependencies != dependencies
     ):
-        controller = OfficialRoleController(dependencies)
+        if isinstance(controller, OfficialRoleController):
+            controller.close()
+        controller = OfficialRoleController(dependencies, window if isinstance(window, QWidget) else None)
+        notify = getattr(window, "on_configuration_changed", None)
+        if callable(notify):
+            controller.changed.connect(lambda: notify() if controller.dependencies == OfficialRoleDependencies.from_app_context(window.app_context) else None)
         window._official_role_controller = controller
     return controller
 
 
 def _populate_role_tab(window, scroll: QScrollArea, character_id: int) -> None:
-    if scroll.property("loaded"):
+    if scroll.property("loaded") or getattr(scroll, "_detail_requested", False):
         return
-    detail = _role_controller(window).load_detail(character_id)
+    controller = _role_controller(window)
+    scroll._detail_requested = True
+    scroll.setEnabled(False)
+    if scroll.widget() is None:
+        scroll.setWidget(QLabel("캐릭터 자료를 불러오는 중…", scroll))
+
+    def apply(result) -> None:
+        if not isValid(scroll) or getattr(window, "_official_role_controller", None) is not controller:
+            return
+        if controller.dependencies != OfficialRoleDependencies.from_app_context(window.app_context):
+            return
+        scroll._detail_requested = False
+        detail, source_key = result
+        detail["_view_source_key"] = source_key
+        if character_id in getattr(window, "_official_role_dirty_ids", set()):
+            scroll.setEnabled(True)
+            return
+        _render_role_tab(window, scroll, character_id, detail)
+
+    def failed(error: str) -> None:
+        if not isValid(scroll) or getattr(window, "_official_role_controller", None) is not controller:
+            return
+        scroll._detail_requested = False
+        scroll.setToolTip(f"캐릭터 자료 불러오기 실패: {error}; 캐릭터 페이지에 다시 들어가면 재시도할 수 있습니다.")
+        if isinstance(scroll.widget(), QLabel):
+            scroll.widget().setText("캐릭터 자료를 불러오지 못했습니다. 캐릭터 페이지에 다시 들어가 재시도하세요.")
+
+    def discarded() -> None:
+        if isValid(scroll):
+            scroll._detail_requested = False
+
+    controller.request_detail(character_id, apply, failed, discarded)
+
+
+def _render_role_tab(window, scroll: QScrollArea, character_id: int, detail: dict) -> None:
+    """Construct one hidden section per event-loop turn, then publish a complete editor."""
+    token = object()
+    scroll._role_build_token = token
+    context = getattr(window, "app_context", None)
+    dependencies = OfficialRoleDependencies.from_app_context(context) if context is not None else None
     editor = {
         "detail": detail,
         "marginal_property_weights": dict(detail.get("property_weights") or {}),
         "marginal_main_property_weights": dict(detail.get("main_property_weights") or {}),
         "equipment_context_key": ("saved" if detail["equipment_contexts"]["saved"]["available"] else "current"),
     }
-    window._official_role_editors[character_id] = editor
     # Keep the lazily-built page a hidden child throughout construction.  A
     # parentless QWidget is a transient top-level window on Windows and can be
     # painted as a small popup while the heavy role form is being assembled.
     content = QWidget(scroll.viewport())
     content.hide()
-    scroll.setUpdatesEnabled(False)
-    try:
-        form = QVBoxLayout(content)
-        form.setSpacing(15)
-        form.setContentsMargins(15, 15, 15, 15)
-        form.addWidget(_build_base_group(window, character_id, detail, editor))
-        form.addWidget(_build_awakening_group(window, character_id, detail, editor))
-        form.addWidget(_build_skill_group(window, character_id, detail, editor))
-        limited_catalog = detail.get("catalog_scope") in {"role_page", "reference"}
-        if not limited_catalog:
-            form.addWidget(_build_margin_group(window, character_id, detail, editor))
-        form.addWidget(_build_fork_group(window, character_id, detail, editor))
-        if not limited_catalog:
-            form.addWidget(_build_drive_summary_group(window, detail, editor))
-            form.addWidget(_build_damage_formula_group(detail, editor))
-            form.addWidget(_build_weight_group(window, character_id, detail, editor))
-        form.addSpacing(100)
-        form.addStretch()
-        scroll.setWidget(content)
-        scroll.setProperty("loaded", True)
-        content.show()
-    finally:
-        scroll.setUpdatesEnabled(True)
-    scroll.viewport().update()
+    form = QVBoxLayout(content)
+    form.setSpacing(15)
+    form.setContentsMargins(15, 15, 15, 15)
+    sections = [
+        lambda: _build_base_group(window, character_id, detail, editor),
+        lambda: _build_awakening_group(window, character_id, detail, editor),
+        lambda: _build_skill_group(window, character_id, detail, editor),
+    ]
+    limited_catalog = detail.get("catalog_scope") in {"role_page", "reference"}
+    if not limited_catalog:
+        sections.append(lambda: _build_margin_group(window, character_id, detail, editor))
+    sections.append(lambda: _build_fork_group(window, character_id, detail, editor))
+    if not limited_catalog:
+        sections.extend((
+            lambda: _build_drive_summary_group(window, detail, editor),
+            lambda: _build_damage_formula_group(detail, editor),
+            lambda: _build_weight_group(window, character_id, detail, editor),
+        ))
+
+    def build_next() -> None:
+        expired = (dependencies is not None
+                   and dependencies != OfficialRoleDependencies.from_app_context(window.app_context))
+        expired = expired or getattr(window, "_current_official_role_id", character_id) != character_id
+        expired = expired or getattr(getattr(window, "_official_role_controller", None), "_closed", False)
+        if expired or not isValid(scroll) or not isValid(content) or getattr(scroll, "_role_build_token", None) is not token:
+            if isValid(content):
+                content.deleteLater()
+            return
+        try:
+            if sections:
+                started = perf_counter()
+                form.addWidget(sections.pop(0)())
+                log_perf(logger, "role.section_apply", elapsed_ms=(perf_counter() - started) * 1000)
+                QTimer.singleShot(0, build_next)
+                return
+            form.addSpacing(100)
+            form.addStretch()
+            window._official_role_editors[character_id] = editor
+            scroll.setWidget(content)
+            scroll.setProperty("loaded", True)
+            scroll.setEnabled(True)
+            scroll.setUpdatesEnabled(True)
+            content.show()
+            restore = getattr(scroll, "_restore_scroll_value", None)
+            if restore is not None:
+                QTimer.singleShot(0, lambda: scroll.verticalScrollBar().setValue(int(restore)) if isValid(scroll) else None)
+                scroll._restore_scroll_value = None
+        except Exception as exc:
+            content.deleteLater()
+            scroll.setUpdatesEnabled(True)
+            scroll.setToolTip(f"캐릭터 페이지 준비 실패: {exc}; 캐릭터 페이지에 다시 들어가면 재시도할 수 있습니다.")
+            logger.warning(f"캐릭터 페이지 준비 실패: {exc}")
+
+    QTimer.singleShot(0, build_next)
 
 
-def _save_profiles(window, *, show_message: bool = True) -> bool:
+def _submit_role_change(window, work, committed, *, completion=None):
+    controller = _role_controller(window)
+    if controller.is_writing():
+        return False
+    page = getattr(window, "official_role_page_view", None)
+    if page is not None:
+        page.setEnabled(False)
+
+    def current():
+        return (controller is getattr(window, "_official_role_controller", None)
+                and controller.dependencies == OfficialRoleDependencies.from_app_context(window.app_context))
+
+    def unlock():
+        if current() and page is not None:
+            page.setEnabled(True)
+
+    def done(value):
+        unlock()
+        if current():
+            committed(value)
+            if completion is not None:
+                completion(True)
+        elif completion is not None:
+            completion(False)
+
+    def failed(error):
+        unlock()
+        if current():
+            QMessageBox.warning(window, "작업 미완료", f"편집 내용은 유지되었습니다. 저장된 내용을 확인한 뒤 다시 시도하세요.\n{error}")
+            if completion is not None:
+                completion(False)
+        elif completion is not None:
+            completion(False)
+
+    def application_failed(error):
+        unlock()
+        if current():
+            QMessageBox.warning(window, "제출 후 새로 고침 실패", f"데이터는 이미 제출되었습니다. 캐릭터 페이지에 다시 들어가세요. 중복 저장하지 마세요.\n{error}")
+            if completion is not None:
+                completion(False)
+
+    return controller.submit_change(work, done, failed, application_failed)
+
+
+def _save_profiles(window, *, show_message: bool = True, completion=None) -> bool:
+    controller = _role_controller(window)
+    if controller.is_writing():
+        return False
     dirty_ids = list(getattr(window, "_official_role_dirty_ids", set()))
     world_bonus_dirty = bool(
         getattr(window, "_official_role_world_bonus_dirty", False)
     )
     if not dirty_ids and not world_bonus_dirty:
+        window._my_role_dirty = False
         if show_message:
             QMessageBox.information(window, "저장", "현재 저장할 캐릭터 수정이 없습니다.")
         return True
@@ -235,10 +365,7 @@ def _save_profiles(window, *, show_message: bool = True) -> bool:
                     ordinal=int(detail["profile"].get("ordinal") or 0),
                 )
             )
-        if updates:
-            _role_controller(window).save_profiles(updates)
-        if world_bonus_dirty:
-            _role_controller(window).save_world_bonus(
+        settings = (
                 WorldBonusSettings(
                     yaodao_attack_add=float(
                         window.official_role_world_attack.value()
@@ -247,22 +374,28 @@ def _save_profiles(window, *, show_message: bool = True) -> bool:
                         window.official_role_world_crit_damage.value()
                     )
                     / 100.0,
-                )
-            )
+                ) if world_bonus_dirty else None
+        )
     except Exception as exc:
         QMessageBox.warning(window, "저장 실패", str(exc))
         return False
-    window._official_role_dirty_ids.clear()
-    window._official_role_world_bonus_dirty = False
-    window._my_role_dirty = False
-    if show_message:
-        QMessageBox.information(
-            window,
-            "저장",
-            "캐릭터 육성 포인터와 가구 보너스를 현재 계정 데이터베이스에 저장했습니다.",
-        )
-    _refresh_my_role(window)
-    return True
+    def work():
+        if updates:
+            controller.save_profiles(updates)
+        if settings is not None:
+            controller.save_world_bonus(settings)
+
+    def committed(_value):
+        window._official_role_dirty_ids.clear()
+        window._official_role_world_bonus_dirty = False
+        window._my_role_dirty = False
+        if settings is not None:
+            window._official_role_saved_world_bonus = settings
+        _refresh_my_role(window, force=True)
+        if show_message:
+            QMessageBox.information(window, "저장", "캐릭터 육성 포인터와 가구 보너스를 현재 계정 데이터베이스에 저장했습니다.")
+
+    return _submit_role_change(window, work, committed, completion=completion)
 
 
 def _reload_current_role_tab(window, character_id: int) -> None:
@@ -276,7 +409,6 @@ def _reload_current_role_tab(window, character_id: int) -> None:
     if index < 0:
         return
     scroll = tabs.widget(index)
-    scroll.setUpdatesEnabled(False)
     existing = scroll.widget()
     if existing is not None:
         existing.hide()
@@ -293,6 +425,9 @@ def _reload_current_role_tab(window, character_id: int) -> None:
 
 
 def _reset_current_role(window) -> None:
+    controller = _role_controller(window)
+    if controller.is_writing():
+        return
     tabs = getattr(window, "official_role_tabs", None)
     if tabs is None or tabs.currentIndex() < 0:
         return
@@ -306,16 +441,16 @@ def _reset_current_role(window) -> None:
     )
     if answer != QMessageBox.Yes:
         return
-    try:
-        _role_controller(window).reset_profile(character_id)
-    except Exception as exc:
-        QMessageBox.warning(window, "초기화 실패", str(exc))
-        return
-    _reload_current_role_tab(window, character_id)
-    QMessageBox.information(window, "초기화됨", "현재 캐릭터와 아크를 공용 템플릿으로 복원했습니다.")
+    def committed(_value):
+        _reload_current_role_tab(window, character_id)
+        QMessageBox.information(window, "초기화됨", "현재 캐릭터와 아크를 공용 템플릿으로 복원했습니다.")
+    _submit_role_change(window, lambda: controller.reset_profile(character_id), committed)
 
 
 def _reset_all_roles(window) -> None:
+    controller = _role_controller(window)
+    if controller.is_writing():
+        return
     answer = QMessageBox.question(
         window,
         "전체 캐릭터 초기화",
@@ -325,21 +460,17 @@ def _reset_all_roles(window) -> None:
     )
     if answer != QMessageBox.Yes:
         return
-    try:
-        count = _role_controller(window).reset_all_profiles()
-    except Exception as exc:
-        QMessageBox.warning(window, "초기화 실패", str(exc))
-        return
-    window._official_role_dirty_ids.clear()
-    window._my_role_dirty = bool(
-        getattr(window, "_official_role_world_bonus_dirty", False)
-    )
-    _refresh_my_role(window)
-    QMessageBox.information(window, "초기화됨", f"캐릭터 {count}명과 아크를 공용 템플릿으로 복원했습니다.")
+    def committed(count):
+        window._official_role_dirty_ids.clear()
+        window._my_role_dirty = bool(getattr(window, "_official_role_world_bonus_dirty", False))
+        _refresh_my_role(window, force=True)
+        QMessageBox.information(window, "초기화됨", f"캐릭터 {count}명과 아크를 공용 템플릿으로 복원했습니다.")
+    _submit_role_change(window, controller.reset_all_profiles, committed)
 
 
 def _page_my_role(window) -> QWidget:
     page = QWidget()
+    window.official_role_page_view = page
     root = QVBoxLayout(page)
     root.setContentsMargins(20, 16, 20, 16)
     root.setSpacing(10)
@@ -399,10 +530,7 @@ def _page_my_role(window) -> QWidget:
     header.addWidget(sync)
     header.addWidget(save)
     root.addLayout(header)
-    sync_result = QPlainTextEdit()
-    sync_result.setReadOnly(True)
-    sync_result.setAccessibleName('캐릭터 동기화 결과')
-    sync_result.setMaximumHeight(110)
+    sync_result = RoleSyncResultText(page)
     sync_result.hide()
     root.addWidget(sync_result)
 
@@ -434,20 +562,72 @@ def _page_my_role(window) -> QWidget:
     return page
 
 
-def _refresh_my_role(window, *, restore_scroll_value: int | None = None) -> None:
-    layout = getattr(window, "my_role_form_layout", None)
-    if layout is None:
+def _refresh_my_role(window, *, restore_scroll_value: int | None = None, force: bool = False) -> None:
+    if getattr(window, "my_role_form_layout", None) is None:
+        return
+    if getattr(window, "_my_role_dirty", False) and not force:
+        return  # Background notifications never overwrite an unsaved editor.
+    controller = _role_controller(window)
+    tabs = getattr(window, "official_role_tabs", None)
+
+    def apply(result) -> None:
+        if getattr(window, "_official_role_controller", None) is not controller:
+            return
+        if controller.dependencies != OfficialRoleDependencies.from_app_context(window.app_context):
+            return
+        if getattr(window, "_my_role_dirty", False) and not force:
+            if tabs is not None:
+                tabs.setEnabled(True)
+            return
+        roles, settings, key = result
+        page = getattr(window, "official_role_page_view", None)
+        if page is not None:
+            page.setEnabled(True)
+        if not force and key == getattr(window, "_official_role_source_key", None) and tabs is not None:
+            if tabs.currentWidget() is not None:
+                _populate_role_tab(window, tabs.currentWidget(), int(tabs.tabBar().tabData(tabs.currentIndex())))
+            return
+        window._official_role_saved_world_bonus = settings
+        if not getattr(window, "_official_role_world_bonus_dirty", False):
+            _set_world_bonus_controls(window, settings)
+        sync = getattr(window, "character_profile_sync_controller", None)
+        for control in (window.official_role_world_attack, window.official_role_world_crit_damage):
+            control.setEnabled(not (sync is not None and sync.is_running()))
+        window._official_role_source_key = key
+        _apply_role_index(window, roles, restore_scroll_value=restore_scroll_value)
+
+    def failed(error: str) -> None:
+        if getattr(window, "_official_role_controller", None) is controller:
+            window._official_role_source_key = None
+            window.my_role_form_area.setToolTip(f"캐릭터 목록 불러오기 실패: {error}; 캐릭터 페이지에 다시 들어가면 재시도할 수 있습니다.")
+            logger.warning(f"캐릭터 목록 불러오기 실패: {error}")
+
+    controller.request_index(apply, failed)
+
+
+def _apply_role_index(window, roles, *, restore_scroll_value: int | None = None) -> None:
+    layout = window.my_role_form_layout
+    signature = tuple((int(role["character_id"]), str(role.get("name_zh") or role["character_id"])) for role in roles)
+    tabs = getattr(window, "official_role_tabs", None)
+    if tabs is not None and getattr(window, "_official_role_index_signature", None) == signature:
+        for index in range(tabs.count()):
+            scroll = tabs.widget(index)
+            scroll._detail_requested = False
+            scroll._role_build_token = None
+            scroll.setProperty("loaded", False)
+            scroll.setEnabled(False)
+        window._official_role_editors = {}
+        tabs.setEnabled(True)
+        current_scroll = tabs.currentWidget()
+        if current_scroll is not None:
+            current_scroll._restore_scroll_value = restore_scroll_value
+            _populate_role_tab(window, current_scroll, int(tabs.tabBar().tabData(tabs.currentIndex())))
         return
     current_id = getattr(window, "_current_official_role_id", None)
-    if not getattr(window, "_official_role_world_bonus_dirty", False):
-        _set_world_bonus_controls(
-            window,
-            _role_controller(window).load_world_bonus(),
-        )
     _clear_layout(layout)
     window._official_role_editors = {}
-    roles = _role_controller(window).load_index()
     if not roles:
+        window.official_role_tabs = None
         layout.addWidget(QLabel("공식 캐릭터 데이터가 없습니다."))
         return
 
@@ -504,22 +684,16 @@ def _refresh_my_role(window, *, restore_scroll_value: int | None = None) -> None
     window._official_role_search_filter_widget = search
     wanted_index = tab_ids.get(current_id, 0)
     tabs.setCurrentIndex(wanted_index)
-    load_visible(tabs.currentIndex())
     window.official_role_tabs = tabs
+    window._official_role_index_signature = signature
     layout.addWidget(tabs)
-    if restore_scroll_value is not None:
+    filter_tabs(search.text())
+    current_scroll = tabs.currentWidget()
+    if current_scroll is not None:
+        current_scroll._restore_scroll_value = restore_scroll_value
+    load_visible(tabs.currentIndex())
 
-        def restore_scroll() -> None:
-            current_scroll = tabs.currentWidget()
-            if isinstance(current_scroll, QScrollArea):
-                current_scroll.verticalScrollBar().setValue(int(restore_scroll_value))
-
-        # The tab content computes its height after it is attached to the
-        # page, so restore on the next event-loop turn instead of clamping to 0.
-        QTimer.singleShot(0, restore_scroll)
-
-
-def confirm_pending_my_role_changes(window) -> bool:
+def confirm_pending_my_role_changes(window, *, completion=None) -> bool:
     if not getattr(window, "_my_role_dirty", False):
         return True
     answer = QMessageBox.question(
@@ -538,15 +712,16 @@ def confirm_pending_my_role_changes(window) -> bool:
         _role_controller(window).log_dirty_exit(
             "save", len(getattr(window, "_official_role_dirty_ids", set()))
         )
-        return _save_profiles(window, show_message=False)
+        _save_profiles(window, show_message=False, completion=completion)
+        return not getattr(window, "_my_role_dirty", False)
     _role_controller(window).log_dirty_exit(
         "discard", len(getattr(window, "_official_role_dirty_ids", set()))
     )
     window._official_role_dirty_ids.clear()
     window._official_role_world_bonus_dirty = False
-    _set_world_bonus_controls(
-        window,
-        _role_controller(window).load_world_bonus(),
-    )
+    saved_bonus = getattr(window, "_official_role_saved_world_bonus", None)
+    if saved_bonus is not None:
+        _set_world_bonus_controls(window, saved_bonus)
+    window._official_role_source_key = None
     window._my_role_dirty = False
     return True

@@ -35,7 +35,7 @@ from src.services.game_ui_asset_catalog import GameUiAssetCatalog
 from src.storage.sqlite.static_game_data_dao import StaticGameDataDao
 from src.ui.widgets import SearchableComboBox
 
-@lru_cache(maxsize=96)
+@lru_cache(maxsize=512)
 def _official_role_portrait(
     role_name: str,
     game_ui_asset_root: Path,

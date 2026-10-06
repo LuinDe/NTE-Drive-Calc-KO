@@ -40,7 +40,7 @@ from src.storage.sqlite.user_data_dao import (
 
 BATTLE_REPORT_TRANSFER_FORMAT = "nte-drive-calculator.battle-report-package"
 BATTLE_REPORT_TRANSFER_VERSION = 2
-SUPPORTED_SOURCE_USER_DATABASE_SCHEMAS = frozenset({36, 37, 38, 39, 40, 41, 42, 43})
+SUPPORTED_SOURCE_USER_DATABASE_SCHEMAS = frozenset({36, 37, 38, 39, 40, 41, 42, 43, 44})
 
 
 @dataclass(frozen=True, slots=True)

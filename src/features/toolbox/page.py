@@ -4,26 +4,21 @@
 from __future__ import annotations
 
 from src.features.toolbox.rewind_preferences import preference_custom_percent as _preference_custom_percent
+from src.domain.rewind_loadout import read_slot_preferences
 
-from dataclasses import dataclass
 from typing import Callable
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QButtonGroup,
     QAbstractSpinBox,
     QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QStackedWidget,
     QTabWidget,
     QToolButton,
@@ -32,14 +27,11 @@ from PySide6.QtWidgets import (
 )
 
 from src.app.theme import themed_style
-from src.domain.role_name_order import role_name_sort_key
+from src.app.window_geometry import fit_dialog_to_available_screen
 from src.app.workers import WorkerThread
 from src.features.toolbox.cultivation_entry import (
     build_cultivation_calculator_entry,
 )
-from src.integrations.bundled_resources import bundled_game_ui_asset_root
-from src.services.game_ui_asset_catalog import GameUiAssetCatalog
-from src.ui.role_portrait import custom_role_portrait
 from src.services.rewind_shape_recommendation_service import (
     RewindShapeAnalysis,
     RewindShapeRecommendationService,
@@ -47,20 +39,13 @@ from src.services.rewind_shape_recommendation_service import (
 )
 from src.features.toolbox.rewind_execution_dialog import RewindExecutionOptions
 from src.features.toolbox.rewind_execution_ui import RewindExecutionUiMixin
-from src.features.toolbox.rewind_role_selection import (
-    configure_rewind_role_score_card,
-)
+from src.features.toolbox.rewind_selection_ui import RewindSelectionUiMixin
 from src.features.toolbox.rewind_slot_ui import RewindSlotUiMixin
 from src.features.toolbox.static_catalog_entry import build_static_catalog_entry
 from src.features.toolbox.toolbox_navigation import (
     CultivationToolboxNavigation,
     ToolboxDependencies,
 )
-
-@dataclass(frozen=True, slots=True)
-class _RewindUiCatalog:
-    roles: tuple[RewindTargetRole, ...]
-    owned_shape_counts: tuple[tuple[str, int], ...]
 
 class ToolboxPage:
     """Builds a tile-based toolbox without introducing another primary domain."""
@@ -163,125 +148,7 @@ class ToolboxPage:
             return
         dialog = _RewindRecommendationDialog(service, self._dialog_parent, operation_guard=self._dependencies.operation_guard, operation_generation=self._dependencies.operation_generation, operation_entry=self._dependencies.operation_entry, operation_unavailable=self._dependencies.operation_unavailable)
         dialog.exec()
-class _RoleSelectionDialog(QDialog):
-    """Avatar-card picker shared by target-role and main-role selections."""
-
-    def __init__(
-        self,
-        parent: QWidget,
-        *,
-        title: str,
-        description: str,
-        roles: tuple[RewindTargetRole, ...],
-        selected_character_ids: set[int],
-        asset_root=None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(720, 620)
-        self._cards: list[tuple[QToolButton, int, str]] = []
-        selected = {int(value) for value in selected_character_ids}
-        catalog = GameUiAssetCatalog(asset_root or bundled_game_ui_asset_root())
-
-        root = QVBoxLayout(self)
-        root.setSpacing(10)
-        note = QLabel(description)
-        note.setWordWrap(True)
-        note.setStyleSheet(themed_style("color:#8b949e"))
-        root.addWidget(note)
-
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("캐릭터 검색 (한글·병음 지원)")
-        self.search_edit.textChanged.connect(self._apply_filter)
-        root.addWidget(self.search_edit)
-
-        toolbar = QHBoxLayout()
-        select_all = QPushButton("전체 선택")
-        clear_all = QPushButton("비우기")
-        select_all.clicked.connect(lambda: self._set_visible_checked(True))
-        clear_all.clicked.connect(lambda: self._set_visible_checked(False))
-        toolbar.addWidget(select_all)
-        toolbar.addWidget(clear_all)
-        toolbar.addStretch()
-        self.count_label = QLabel()
-        self.count_label.setStyleSheet(themed_style("color:#58a6ff;font-weight:700"))
-        toolbar.addWidget(self.count_label)
-        root.addLayout(toolbar)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        content = QWidget()
-        self._grid = QGridLayout(content)
-        self._grid.setContentsMargins(4, 4, 4, 4)
-        self._grid.setHorizontalSpacing(8)
-        self._grid.setVerticalSpacing(8)
-        self._grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        for role in sorted(roles, key=lambda item: (role_name_sort_key(item.name), item.character_id)):
-            card = QToolButton(content)
-            card.setObjectName("rewindRoleSelectionCard")
-            card.setCheckable(True)
-            card.setChecked(role.character_id in selected)
-            configure_rewind_role_score_card(card, role)
-            avatar_path = catalog.character_icon(role.character_id)
-            if role.is_custom or avatar_path is not None:
-                card.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-                card.setIconSize(QSize(76, 76))
-                card.setIcon(QIcon(custom_role_portrait(76, card.devicePixelRatioF())) if role.is_custom else QIcon(str(avatar_path)))
-            else:
-                card.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            card.setStyleSheet(themed_style(
-                "QToolButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
-                "border-radius:8px;padding:6px 6px 24px 6px;font-size:12px;font-weight:700;}"
-                "QToolButton:hover{border-color:#58a6ff;background:#1f6feb22;}"
-                "QToolButton:checked{border:2px solid #58a6ff;background:#1f6feb;color:#fff;}"
-            ))
-            card.toggled.connect(self._update_count)
-            self._cards.append((card, role.character_id, role.name))
-        self._reflow_cards()
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-        self._update_count()
-
-    def _apply_filter(self, text: str) -> None:
-        self._reflow_cards(str(text or "").strip())
-
-    def _reflow_cards(self, keyword: str = "") -> None:
-        while self._grid.count():
-            self._grid.takeAt(0)
-        visible = [
-            row for row in self._cards
-            if not keyword or _matches_role_name(row[2], keyword)
-        ]
-        for card, _character_id, _name in self._cards:
-            card.setVisible(False)
-        for index, (card, _character_id, _name) in enumerate(visible):
-            self._grid.addWidget(card, index // 5, index % 5)
-            card.setVisible(True)
-
-    def _set_visible_checked(self, checked: bool) -> None:
-        for card, _character_id, _name in self._cards:
-            if not card.isHidden():
-                card.setChecked(checked)
-        self._update_count()
-
-    def _update_count(self, _checked: bool | None = None) -> None:
-        self.count_label.setText(f"{len(self.selected_character_ids())}명 선택됨")
-
-    def selected_character_ids(self) -> tuple[int, ...]:
-        return tuple(
-            character_id
-            for card, character_id, _role_name in self._cards
-            if card.isChecked()
-        )
-
-
-class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDialog):
+class _RewindRecommendationDialog(RewindSelectionUiMixin, RewindExecutionUiMixin, RewindSlotUiMixin, QDialog):
     """Immediate shell for the rewind advisor; data work stays off the UI thread."""
 
     _strategy_labels = {
@@ -296,6 +163,7 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
         self.operation_entry = operation_entry
         self.operation_unavailable = operation_unavailable
         self._service = service
+        self._initialize_selection_lifecycle()
         self._roles: tuple[RewindTargetRole, ...] = ()
         self._role_names: dict[int, str] = {}
         self._target_character_ids: set[int] = set()
@@ -304,6 +172,10 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
         preferences = getattr(service, "load_preferences", lambda: {})()
         self._target_character_ids = {int(value) for value in preferences.get("target_character_ids", ())}
         self._main_character_ids = {int(value) for value in preferences.get("main_character_ids", ())}
+        self._saved_slot_ids_by_strategy = {
+            key: read_slot_preferences(preferences, strategy=key) for key in ("balanced", "focused")
+        }
+        self._selected_slots_by_strategy = {"balanced": {}, "focused": {}}
         self._strategy_key = str(preferences.get("strategy", self._strategy_key))
         self._target_grade = str(preferences.get("target_grade", "S"))
         self._target_threshold_mode = str(preferences.get("target_threshold_mode", "grade"))
@@ -325,7 +197,7 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
 
         self.setWindowTitle("되감기 추천")
         self.resize(900, 700)
-        self.setMinimumWidth(760)
+        self.setMinimumWidth(320)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
@@ -357,6 +229,7 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
 
         # Let the modal paint before opening the two read-only database jobs.
         QTimer.singleShot(0, self, self._load_roles_async)
+        fit_dialog_to_available_screen(self, QSize(900, 700))
         self._initialize_rewind_slots(
             self._saved_rewind_shape_ids,
             self._saved_rewind_slots,
@@ -566,106 +439,6 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
     def _strategy_value(self) -> str:
         return self._strategy_key
 
-    def _load_roles_async(self) -> None:
-        if self._roles_worker is not None and self._roles_worker.isRunning():
-            return
-        self._target_summary.setText("캐릭터 목록을 불러오는 중…")
-        self._main_summary.setText("캐릭터 목록을 불러오는 중…")
-        worker = WorkerThread(target=self._load_role_and_inventory_catalog, parent=self)
-        self._roles_worker = worker
-        worker.result_ready.connect(self._on_roles_loaded)
-        worker.error.connect(self._on_roles_load_error)
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
-
-    def _load_role_and_inventory_catalog(self) -> _RewindUiCatalog:
-        role_loader = getattr(self._service, "list_target_roles", None)
-        count_loader = getattr(self._service, "load_owned_shape_counts", None)
-        return _RewindUiCatalog(
-            roles=role_loader() if callable(role_loader) else (),
-            owned_shape_counts=count_loader() if callable(count_loader) else (),
-        )
-
-    def _on_roles_loaded(self, result: object) -> None:
-        if isinstance(result, _RewindUiCatalog):
-            roles = result.roles
-            owned_shape_counts = result.owned_shape_counts
-        else:
-            roles = result
-            owned_shape_counts = ()
-        self._roles = tuple(roles)
-        self._role_names = {role.character_id: role.name for role in self._roles}
-        self._set_replacement_inventory_counts(dict(owned_shape_counts))
-        self._target_button.setEnabled(True)
-        self._main_button.setEnabled(True)
-        self._update_role_summaries()
-
-    def _on_roles_load_error(self, message: str) -> None:
-        self._target_summary.setText("캐릭터 목록 불러오기 실패")
-        self._main_summary.setText("캐릭터 목록 불러오기 실패")
-
-    def _choose_target_roles(self) -> None:
-        if not self._roles:
-            return
-        dialog = _RoleSelectionDialog(
-            self,
-            title="육성할 캐릭터 선택",
-            description="육성하려는 캐릭터를 선택하세요. 되감기는 이 캐릭터들에게 필요한 카트리지의 드라이브 형태를 우선 채웁니다.",
-            roles=self._roles,
-            selected_character_ids=self._target_character_ids,
-            asset_root=getattr(self._service, "asset_root", None),
-        )
-        if dialog.exec() == QDialog.Accepted:
-            self._target_character_ids = set(dialog.selected_character_ids())
-            self._save_preferences()
-            self._update_role_summaries()
-
-    def _choose_main_roles(self) -> None:
-        if not self._roles:
-            return
-        dialog = _RoleSelectionDialog(
-            self,
-            title="집중 캐릭터 선택",
-            description="다중 선택 가능. 소수 집중은 이 캐릭터들의 목표 등급 미달 장착 드라이브만 분석합니다.",
-            roles=self._roles,
-            selected_character_ids=self._main_character_ids,
-            asset_root=getattr(self._service, "asset_root", None),
-        )
-        if dialog.exec() == QDialog.Accepted:
-            self._main_character_ids = set(dialog.selected_character_ids())
-            self._target_character_ids.update(self._main_character_ids)
-            self._save_preferences()
-            self._update_role_summaries()
-
-    def _save_preferences(self) -> None:
-        saver = getattr(self._service, "save_preferences", None)
-        if callable(saver):
-            preferences = dict(getattr(self._service, "load_preferences", lambda: {})())
-            preferences.update({
-                "target_character_ids": sorted(self._target_character_ids),
-                "main_character_ids": sorted(self._main_character_ids),
-                "strategy": self._strategy_key,
-                "target_grade": self._target_grade,
-                "target_threshold_mode": self._target_threshold_mode,
-                "target_custom_percent": self._target_custom_percent,
-                "rewind_qualities": list(self._rewind_options.qualities),
-                "rewind_drive_customization": self._rewind_options.drive_customization,
-            })
-            saver(preferences)
-
-    def _update_role_summaries(self) -> None:
-        if not self._roles and self._roles_worker is not None:
-            return
-        self._target_summary.setText(self._role_summary(self._target_character_ids, "선택하지 않음, 캐릭터를 선택하세요"))
-        self._main_summary.setText(self._role_summary(self._main_character_ids, "선택하지 않음, 캐릭터를 선택하세요"))
-
-    def _role_summary(self, character_ids: set[int], empty_text: str) -> str:
-        names = [self._role_names[identifier] for identifier in sorted(character_ids) if identifier in self._role_names]
-        if not names:
-            return empty_text
-        shown = "、".join(names[:3])
-        return shown if len(names) <= 3 else f"{shown} 등 {len(names)}명"
-
     def _show_strategy_help(self) -> None:
         QMessageBox.information(
             self,
@@ -690,59 +463,6 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
             "직접 지정: 입력한 백분율 기준",
         )
         message.exec()
-
-    def _refresh_analysis(self) -> None:
-        if self._target_threshold_mode == "custom" and self._target_custom_percent is None:
-            message = "직접 지정 점수 백분율(1.0%~100.0%)을 선택하세요."
-            QMessageBox.warning(self, "추천 생성", message)
-            self._render_message("추천이 생성되지 않음", message)
-            return
-        token = object()
-        self._analysis_token = token
-        self._generate_button.setEnabled(False)
-        self._generate_button.setText("분석 중…")
-        self._render_loading()
-        target_ids = tuple(sorted(self._target_character_ids))
-        primary_ids = tuple(sorted(self._main_character_ids))
-        strategy = self._strategy_value()
-        worker = WorkerThread(
-            target=lambda: self._service.analyze_for_targets(
-                target_character_ids=target_ids,
-                strategy=strategy,
-                primary_character_ids=primary_ids,
-                selection_limit=8,
-                target_grade=self._target_grade,
-                target_custom_percent=(
-                    self._target_custom_percent
-                    if self._target_threshold_mode == "custom"
-                    else None
-                ),
-            ),
-            parent=self,
-        )
-        self._analysis_worker = worker
-        worker.result_ready.connect(lambda analysis, current=token: self._on_analysis_ready(current, analysis))
-        worker.error.connect(lambda message, current=token: self._on_analysis_error(current, message))
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
-
-    def _on_analysis_ready(self, token: object, analysis: object) -> None:
-        if token is not self._analysis_token or not isinstance(analysis, RewindShapeAnalysis):
-            return
-        self._generate_button.setEnabled(True)
-        self._generate_button.setText("방안 생성")
-        if analysis.notice:
-            self._render_message("추천 안내", analysis.notice)
-            return
-        self._render_plans(analysis)
-
-    def _on_analysis_error(self, token: object, message: str) -> None:
-        if token is not self._analysis_token:
-            return
-        self._generate_button.setEnabled(True)
-        self._generate_button.setText("다시 생성")
-        QMessageBox.warning(self, "추천 생성", message)
-        self._render_message("추천이 생성되지 않음", message)
 
     def _render_loading(self) -> None:
         self._render_message("추천을 생성하는 중", "되감기 추천을 열었습니다. 백그라운드에서 스냅샷을 읽고 캐릭터 점수 품질을 매칭하는 중…")
@@ -782,12 +502,6 @@ class _RewindRecommendationDialog(RewindExecutionUiMixin, RewindSlotUiMixin, QDi
             "focused": "소수 집중 추천이 생성되었습니다. 8개 슬롯을 계속 직접 조정할 수 있습니다.",
         }.get(analysis.strategy, "추천이 생성되었습니다. 8개 슬롯을 계속 직접 조정할 수 있습니다.")
         self._render_rewind_slots("추천 방안", description)
-
-
-def _matches_role_name(name: str, keyword: str) -> bool:
-    from src.ui.widgets import match_pinyin
-
-    return match_pinyin(name, keyword)
 
 
 def build_toolbox_page(window) -> QWidget:

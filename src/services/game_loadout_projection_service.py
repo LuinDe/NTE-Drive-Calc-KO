@@ -207,11 +207,11 @@ class GameLoadoutProjectionService:
             _geometry_key(shape["shape_id"]): shape
             for shape in self.static_dao.list_shapes()
         }
-        active_plans = {
-            int(plan["character_id"]): plan
-            for plan in self.user_dao.list_loadout_plans()
-            if plan.get("is_active")
-        }
+        current_plans: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        # Slot pointers own current identity; is_active only describes legacy history.
+        for row in self.user_dao.list_current_loadout_slot_plans(include_archived=False):
+            plan = row["plan"]
+            current_plans[int(row["slot"]["character_id"])].append(plan)
         roles = []
         for character_id, items in sorted(
             grouped.items(),
@@ -259,13 +259,12 @@ class GameLoadoutProjectionService:
                     "rotation": 0,
                 })
             fingerprint = _equipment_fingerprint(items)
-            active = active_plans.get(character_id)
-            payload = dict((active or {}).get("payload") or {})
-            imported = bool(
-                active
-                and payload.get("source") == "game_inventory"
-                and payload.get("equipment_fingerprint") == fingerprint
-            )
+            plans = current_plans.get(character_id, [])
+            matching = next((plan for plan in plans
+                             if (plan.get("payload") or {}).get("source") == "game_inventory"
+                             and (plan.get("payload") or {}).get("equipment_fingerprint") == fingerprint), None)
+            imported = matching is not None
+            active = matching if imported else next(iter(plans), None)
             roles.append(GameLoadoutRoleProjection(
                 snapshot_id=snapshot_id,
                 character_id=character_id,

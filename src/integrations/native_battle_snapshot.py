@@ -9,7 +9,7 @@ from src.integrations.native_inventory_snapshot import NativeSnapshotPending, re
 from src.integrations.nte_core_protocol import NteCoreProtocolError, NteCoreRpcError, NteCoreTimeoutError
 
 
-DOMAINS = ("character", "inventory", "team", "environment")
+DOMAINS = ("character", "team", "environment")
 FREEZE_TIMEOUT_SECONDS = 60.0
 
 
@@ -39,7 +39,7 @@ def read_first_hit_snapshot(client, check, references):
             )):
                 raise NteCoreProtocolError("첫 히트 고정 스냅샷의 식별 정보가 일치하지 않습니다.")
             bundle["domains"][domain] = read_native_raw_domain(call, check, domain, header=header)
-            if domain in ("character", "inventory"):
+            if domain == "character":
                 bundle[f"{domain}_projection"] = read_native_projection(call, check, domain=domain, header=header)
         except (NativeSnapshotPending, NteCoreRpcError) as error:
             if not _retryable(error):
@@ -62,11 +62,11 @@ def _retryable(error):
         } or error.domain_code in {"NATIVE_SNAPSHOT_INCOMPLETE", "NATIVE_MAPPING_UNSUPPORTED"}))
 
 
-def validate_native_snapshot_current(bundle, status):
+def validate_native_snapshot_current(bundle, status, *, require_current=False):
     if not isinstance(status, dict) or not isinstance(status.get("domains"), list):
         raise NteCoreProtocolError("전투 리포트 스냅샷 재확인 상태가 유효하지 않습니다.")
     observations = list(bundle["domains"].values())
-    observations.extend(bundle[key] for key in ("inventory_projection", "character_projection") if key in bundle)
+    observations.extend(bundle[key] for key in ("character_projection",) if key in bundle)
     for snapshot in observations:
         # Completed pages are immutable observations, not a promise that the live
         # cache still points to them. First-hit and in-scope evidence validates
@@ -77,9 +77,17 @@ def validate_native_snapshot_current(bundle, status):
             raise NteCoreProtocolError("전투 리포트 스냅샷 재확인에 고유 데이터 영역이 누락되었습니다.")
         if status.get("providerId") != snapshot["providerId"]:
             raise _SnapshotChanged("전투 리포트 준비 중에 수집 제공자가 변경되었습니다.")
+        if require_current:
+            current = matches[0]
+            if (current.get("dirty") is not False or current.get("ready") is not True
+                    or current.get("enabled") is not True
+                    or any(current.get(key) != snapshot.get(key) for key in ("domainKey", "revision"))):
+                # Future hits can pin only the DLL's current observations. A later
+                # domain read may discover a scene change and retire earlier ones.
+                raise _SnapshotChanged("첫 히트 준비 중 데이터 영역이 무효화되어 현재 구성을 다시 읽습니다.")
 
 
-def freeze_native_battle_snapshot(client, check, *, baseline=None):
+def freeze_native_battle_snapshot(client, check, *, baseline=None, require_current=False):
     capabilities = (client.hello_result or {}).get("capabilities", ())
     base = {"schema_version": 1, "binding": "first_hit_revision", "domains": {}}
     if "snapshot.changes.v1" not in capabilities:
@@ -101,7 +109,10 @@ def freeze_native_battle_snapshot(client, check, *, baseline=None):
         bundle = {**base, "domains": {}, "missing": [], "state": "observed"}
         try:
             status = call("native.snapshot.status", {}) if baseline is not None else None
-            for domain in DOMAINS:
+            # Publish the small context domains before a multi-pulse account read.
+            # First-hit pinned reads above keep their original, immutable order.
+            read_order = ("team", "environment", "character") if require_current else DOMAINS
+            for domain in read_order:
                 if f"{domain}.snapshot.v1" not in capabilities:
                     bundle["missing"].append(f"{domain}_snapshot_unavailable")
                     continue
@@ -113,8 +124,7 @@ def freeze_native_battle_snapshot(client, check, *, baseline=None):
                             bundle[f"{domain}_projection"] = cached["projection"]
                     else:
                         from src.integrations.native_inline_snapshot import INLINE_RAW_CAPABILITY, InlineSnapshotPages
-                        projection_cap = {"inventory": "native_inventory_dto_v1",
-                                          "character": "native_character_profile_v1"}.get(domain)
+                        projection_cap = {"character": "native_character_profile_v1"}.get(domain)
                         if INLINE_RAW_CAPABILITY in capabilities and projection_cap in capabilities:
                             inline = InlineSnapshotPages(call, domain)
                             try:
@@ -138,7 +148,7 @@ def freeze_native_battle_snapshot(client, check, *, baseline=None):
                     bundle["missing"].append(f"{domain}_snapshot_unavailable")
                     # A failed raw refresh invalidates this domain's earlier formal projection too.
                     bundle.pop(f"{domain}_projection", None)
-            for domain, cap in (("inventory", "native_inventory_dto_v1"), ("character", "native_character_profile_v1")):
+            for domain, cap in (("character", "native_character_profile_v1"),):
                 if f"{domain}_projection" in bundle:
                     continue
                 if f"{domain}_projection_unavailable" in bundle["missing"]:
@@ -154,18 +164,19 @@ def freeze_native_battle_snapshot(client, check, *, baseline=None):
                     if not _retryable(error):
                         raise
                     bundle["missing"].append(f"{domain}_projection_unavailable")
-            validate_native_snapshot_current(bundle, call("native.snapshot.status", {}))
+            if baseline is not None:
+                for domain, snapshot in bundle["domains"].items():
+                    projection = bundle.get(f"{domain}_projection")
+                    if domain in ("team", "environment") or projection is not None:
+                        baseline.put(domain, snapshot, projection)
+            validate_native_snapshot_current(bundle, call("native.snapshot.status", {}),
+                                             require_current=require_current)
             check()
             current_character = bundle["domains"].get("character") or {}
             if prior_character and prior_character.get("revision") != current_character.get("revision"):
                 bundle["prior_character_observation"] = prior_character
             if len(json.dumps(bundle, ensure_ascii=False).encode("utf-8")) > MAX_BUNDLE_BYTES:
                 raise NteCoreProtocolError("전투 리포트 입장 스냅샷 총 크기가 한도를 초과했습니다.")
-            if baseline is not None:
-                for domain, snapshot in bundle["domains"].items():
-                    projection = bundle.get(f"{domain}_projection")
-                    if domain in ("team", "environment") or projection is not None:
-                        baseline.put(domain, snapshot, projection)
             return bundle
         except (NativeSnapshotPending, NteCoreRpcError) as error:
             if not _retryable(error):

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from src.features.input_operation_entry import request_input_entry, show_input_unavailable
+from src.features.input_operation_entry import request_input_entry, show_sync_required
 from typing import Any
 
 from PySide6.QtCore import QModelIndex, Qt
@@ -522,7 +522,7 @@ def _save_warehouse_state_changes(self):
         return
     sync_service = getattr(self, "_inventory_sync_service", None)
     if sync_service is None or not sync_service.is_running:
-        show_input_unavailable(self, "창고 상태 저장", "게임 장비 연결이 아직 준비되지 않았습니다. 검사 상세 정보를 확인하세요; 컴포넌트를 배포해야 하면 먼저 게임을 완전히 종료하고, 배포가 완료된 후 다시 시작해 게임 장면에 진입하세요.")
+        show_sync_required(self, "창고 상태 저장")
         return
     service = WarehouseStateManagementService(
         self.app_context.account.user_database_path,
@@ -557,8 +557,8 @@ def _on_warehouse_manual_plan_ready(self, plan):
     for change in plan.changes:
         counts[{"discarded": "폐기", "locked": "잠금", "normal": "정상"}[change["target_state"]]] += 1
     message = (
-        f"장비 {len(plan.changes)}개의 수동 상태를 저장합니다: 폐기 {counts['弃置']}개,"
-        f"잠금 {counts['锁定']}개, 정상 복원 {counts['正常']}개.\n\n"
+        f"장비 {len(plan.changes)}개의 수동 상태를 저장합니다: 폐기 {counts['폐기']}개, "
+        f"잠금 {counts['잠금']}개, 정상 복원 {counts['정상']}개.\n\n"
         "확인하면 로컬 코어 구성 요소를 통해 게임에 바로 기록됩니다."
     )
     if (
@@ -621,7 +621,7 @@ def _open_warehouse_state_manager(self):
         return
     sync_service = getattr(self, "_inventory_sync_service", None)
     if sync_service is None or not sync_service.is_running:
-        show_input_unavailable(self, "창고 상태 관리", "게임 장비 연결이 아직 준비되지 않았습니다. 검사 상세 정보를 확인하세요; 컴포넌트를 배포해야 하면 먼저 게임을 완전히 종료하고, 배포가 완료된 후 다시 시작해 게임 장면에 진입하세요.")
+        show_sync_required(self, "창고 상태 관리")
         return
     service = WarehouseStateManagementService(
         account.user_database_path,
@@ -660,7 +660,7 @@ def _on_warehouse_state_plan_ready(self, plan):
             counts["取消弃置/锁定"] += 1
     message = (
         f"스냅샷 #{plan.snapshot_id} 기준으로 장비 {len(plan.changes)}개를 처리합니다:\n"
-        f"폐기 {counts['弃置']}개, 잠금 {counts['锁定']}개,"
+        f"폐기 {counts['폐기']}개, 잠금 {counts['잠금']}개, "
         f"상태 취소 {counts['取消弃置/锁定']}개.\n\n"
         "확인하면 로컬 코어 구성 요소를 통해 게임에 바로 기록됩니다."
     )

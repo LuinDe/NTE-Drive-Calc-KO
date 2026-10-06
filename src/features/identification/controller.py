@@ -74,6 +74,44 @@ from src.utils.name_resolver import resolve_name
 __all__ = ["IdentificationController"]
 
 
+def _ident_manual_parse_text(owner, text):
+    """The manual box shows the translated text (i18n_display translates setPlainText); the parser needs Chinese.
+
+    Lines still exactly as the app wrote them go back to their source line; in any other line a translated
+    display name of a sub-stat is turned back into its Chinese key.  Text typed in Chinese is left as typed.
+    """
+    loaded = getattr(owner, "_ident_manual_loaded", None)
+    if loaded and text == loaded[0]:
+        return loaded[1]
+    back = {}
+    if loaded:
+        shown, source = loaded[0].split("\n"), loaded[1].split("\n")
+        if len(shown) == len(source):
+            for s, o in zip(shown, source):
+                back.setdefault(s.strip(), o)
+    try:
+        from src.i18n_display import tr
+    except ImportError:  # no display layer
+        tr = None
+    names = {}
+    engine = getattr(owner, "scoring_engine", None)
+    if tr is not None and engine is not None:
+        for name in (*engine.gold_base_values, *engine.stat_alias_mapping):
+            shown_name = tr(name)
+            if shown_name and shown_name != name:
+                names.setdefault(str(shown_name), name)
+    pattern = re.compile("|".join(map(re.escape, sorted(names, key=len, reverse=True)))) if names else None
+    lines = []
+    for line in text.split("\n"):
+        if line.strip() and line.strip() in back:
+            lines.append(back[line.strip()])
+        elif pattern is not None:
+            lines.append(pattern.sub(lambda m: names[m.group(0)], line))
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 class IdentificationController(IdentificationManualParsingMixin, QObject):
     identify_capture_signal = Signal(str)
     identify_capture_done_signal = Signal()
@@ -486,6 +524,7 @@ class IdentificationController(IdentificationManualParsingMixin, QObject):
             self.ident_path_edit.setText(";".join(str(path) for path in maybe_paths))
         else:
             self.ident_manual_text.setPlainText(text)
+            self._ident_manual_loaded = (self.ident_manual_text.toPlainText(), text)
             self._apply_identify_manual_fields(text)
 
     def _identify_from_image_path(self):
@@ -589,12 +628,15 @@ class IdentificationController(IdentificationManualParsingMixin, QObject):
             self.ident_drive_rb.setChecked(True)
             self._set_combo_data(self.ident_shape_combo, item.shape_id)
         self._set_combo_data(self.ident_quality_combo, item.quality)
-        self.ident_manual_text.setPlainText("\n".join(f"{k}: {v}" for k, v in item.sub_stats.items()))
+        source = "\n".join(f"{k}: {v}" for k, v in item.sub_stats.items())
+        self.ident_manual_text.setPlainText(source)
+        self._ident_manual_loaded = (self.ident_manual_text.toPlainText(), source)
         self._on_identify_type_changed()
 
     def _identify_from_manual(self):
         self._identify_dependencies = _current_identification_dependencies(self)
         text = self.ident_manual_text.toPlainText()
+        text = _ident_manual_parse_text(self, text)
         self._apply_identify_manual_fields(text)
         quality = self._identify_quality()
         uid = f"identify_{int(time.time() * 1000)}"

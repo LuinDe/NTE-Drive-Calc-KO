@@ -41,8 +41,13 @@ class EquipmentPluginDeploymentError(RuntimeError):
     """The selected game or plugin file cannot be deployed safely."""
 
 
-def game_process_running() -> bool:
-    """Return whether the game executable is currently present in Windows tasks."""
+def game_process_running() -> bool | None:
+    """Return whether the game executable is currently present in Windows tasks.
+
+    Unconfirmed availability is reported as None and never as "not running":
+    user-initiated deployment or cleanup may continue and let the filesystem
+    decide, while automatic actions must keep waiting for a confirmed exit.
+    """
 
     try:
         result = subprocess.run(
@@ -62,10 +67,10 @@ def game_process_running() -> bool:
             timeout=3,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise EquipmentPluginDeploymentError("게임 프로세스 상태를 확인할 수 없습니다. 다시 검사한 후 컴포넌트를 조작하세요.") from exc
+    except (OSError, subprocess.SubprocessError):
+        return None
     if result.returncode != 0:
-        raise EquipmentPluginDeploymentError("게임 프로세스 검사에 실패했습니다. 다시 검사한 후 컴포넌트를 조작하세요.")
+        return None
     expected = GAME_EXECUTABLE_NAME.casefold()
     return any(
         line.split(",", 1)[0].strip().strip('"').casefold() == expected

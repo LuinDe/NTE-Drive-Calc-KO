@@ -86,8 +86,50 @@ FORK_PERMANENT_EVIDENCE_SQL = """
 FORK_REFINEMENT_LEVEL_SQL = """
     SELECT f.fork_id, s.star_level
     FROM fork_item AS f
-    JOIN fork_star_level AS s ON s.star_pack_id = f.star_pack_id
+    LEFT JOIN fork_star_level AS s ON s.star_pack_id = f.star_pack_id
     ORDER BY f.fork_id, s.star_level
+"""
+
+FORK_SOURCE_COVERAGE_SQL = """
+    WITH RECURSIVE linked AS (
+        SELECT f.fork_id, s.star_level, l.target_asset_path
+        FROM fork_item AS f
+        JOIN fork_star_level AS s ON s.star_pack_id = f.star_pack_id
+        LEFT JOIN combat_effect_buff_link AS l
+          ON l.effect_definition_id =
+             'fork_star:' || s.star_pack_id || ':' || s.star_level
+    ), ancestry(fork_id, star_level, asset_path, depth, visited) AS (
+        SELECT fork_id, star_level, target_asset_path, 0,
+               '|' || lower(target_asset_path) || '|'
+        FROM linked WHERE target_asset_path IS NOT NULL
+        UNION ALL
+        SELECT a.fork_id, a.star_level, r.target_asset_path, a.depth + 1,
+               a.visited || lower(r.target_asset_path) || '|'
+        FROM ancestry AS a
+        JOIN combat_blueprint_reference AS r
+          ON r.source_asset_path = a.asset_path
+         AND r.property_path LIKE '%.Super'
+         AND r.target_available = 1
+        JOIN buff_definition AS parent ON parent.asset_path = r.target_asset_path
+        WHERE a.depth < 8
+          AND instr(a.visited, '|' || lower(r.target_asset_path) || '|') = 0
+    )
+    SELECT f.fork_id,
+           (SELECT COUNT(*) FROM fork_star_level AS s
+            WHERE s.star_pack_id = f.star_pack_id) AS level_count,
+           (SELECT COUNT(*) FROM linked AS l
+            WHERE l.fork_id = f.fork_id
+              AND l.target_asset_path IS NOT NULL) AS link_count,
+           (SELECT COUNT(*) FROM linked AS l
+            LEFT JOIN buff_definition AS b ON b.asset_path = l.target_asset_path
+            WHERE l.fork_id = f.fork_id
+              AND (l.target_asset_path IS NULL OR b.asset_path IS NULL))
+              AS missing_link_count,
+           (SELECT COUNT(*) FROM ancestry AS a
+            JOIN buff_modifier AS m ON m.asset_path = a.asset_path
+            WHERE a.fork_id = f.fork_id) AS modifier_count
+    FROM fork_item AS f
+    ORDER BY f.fork_id
 """
 
 
@@ -96,18 +138,44 @@ def expected_level_map(
 ) -> dict[str, set[int]]:
     expected: dict[str, set[int]] = {}
     for row in rows:
-        expected.setdefault(str(row["fork_id"]), set()).add(int(row["star_level"]))
+        levels = expected.setdefault(str(row["fork_id"]), set())
+        if row["star_level"] is not None:
+            levels.add(int(row["star_level"]))
     return expected
 
 
 def resolve_projection_rows(
     evidence_rows: Iterable[Mapping[str, Any]],
     level_rows: Iterable[Mapping[str, Any]],
+    coverage_rows: Iterable[Mapping[str, Any]] = (),
 ) -> tuple[tuple[ForkPermanentProperty, ...], tuple[ForkPermanentAudit, ...]]:
-    return resolve_fork_permanent_properties(
+    resolved, audits = resolve_fork_permanent_properties(
         evidence_rows,
         expected_level_map(level_rows),
     )
+    coverage = {str(row["fork_id"]): row for row in coverage_rows}
+    reviewed: list[ForkPermanentAudit] = []
+    for item in audits:
+        row = coverage.get(item.fork_id)
+        if (
+            item.status == "missing_calculation_evidence"
+            and row is not None
+            and int(row["level_count"]) == len(item.expected_levels)
+            and int(row["link_count"]) >= len(item.expected_levels)
+            and int(row["missing_link_count"]) == 0
+            and int(row["modifier_count"]) == 0
+        ):
+            item = ForkPermanentAudit(
+                fork_id=item.fork_id,
+                status="confirmed_no_permanent",
+                expected_levels=item.expected_levels,
+                resolved_levels=(),
+                candidate_count=0,
+                binding_method="direct_modifier_coverage",
+                detail="각 재련 레벨의 아크 Buff가 등록되어 있으며, 전제 조건 없는 직접 패널 수정자는 발견되지 않았습니다",
+            )
+        reviewed.append(item)
+    return resolved, tuple(reviewed)
 
 
 def cursor_dicts(cursor: Any) -> list[dict[str, Any]]:

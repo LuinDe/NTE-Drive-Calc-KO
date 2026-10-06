@@ -28,8 +28,8 @@ from src.features.scanning.scan_contracts import (
     offline_scope_replaces_inventory,
     vision_cancel_message,
 )
-from src.features.scanning.scan_source_warning import confirm_scan_mode_after_workbench_sync, restore_scan_mode_selection
-from src.features.scanning.post_action_summary import append_state_mismatch_summary
+from src.features.scanning.scan_source_warning import confirm_scan_mode_entry, restore_scan_mode_selection
+from src.features.scanning.post_action_summary import append_scan_post_action_summary, show_scan_completion
 from src.domain.post_actions import post_actions_enabled, validate_post_action_config
 from src.features.scanning.vision_worker import VisionWorkerThread
 from src.services.full_visual_snapshot_commit import IncompleteVisionScanError, append_tape_main_warning, commit_completed_vision_inventory
@@ -58,8 +58,9 @@ def _on_scan_change(self, id, checked=True):
     previous_id = getattr(self, "_confirmed_scan_mode_id", 4)
     if id in {1, 2, 3}:
         dependencies = _current_scanning_dependencies(self)
-        if not confirm_scan_mode_after_workbench_sync(
-            self.dialog_parent, dependencies.user_database_path
+        if not confirm_scan_mode_entry(
+            self.dialog_parent, dependencies.user_database_path,
+            navigate_home=lambda: self.navigate("home"),
         ):
             restore_scan_mode_selection(self.scan_group, previous_id)
             return
@@ -439,27 +440,7 @@ def _on_vision_done(self, stats):
         snapshot_id=vision_snapshot_id,
         snapshot_written=bool(vision_snapshot_id),
     )
-    if stats.get("post_actions_enabled"):
-        summary += (
-            "\n스캔 후 관리:"
-            f"계산 참여 {int(stats.get('post_action_candidate_count', 0) or 0)}개,"
-            f"대상 변경 {int(stats.get('post_action_target_count', 0) or 0)}개,"
-            f"처리 완료 {int(stats.get('post_action_applied_count', 0) or 0)}개."
-            f"\n폐기 {int(stats.get('discard_set_count', 0) or 0)}개,"
-            f"폐기 취소 {int(stats.get('discard_clear_count', 0) or 0)}개;"
-            f"잠금 {int(stats.get('lock_set_count', 0) or 0)}개,"
-            f"잠금 취소 {int(stats.get('lock_clear_count', 0) or 0)}개."
-        )
-        filtered_parts = []
-        if int(stats.get("post_action_quality_filtered_count", 0) or 0):
-            filtered_parts.append(f"품질 범위 필터 {int(stats.get('post_action_quality_filtered_count', 0) or 0)}개")
-        if int(stats.get("post_action_type_filtered_count", 0) or 0):
-            filtered_parts.append(f"처리 종류 필터 {int(stats.get('post_action_type_filtered_count', 0) or 0)}개")
-        if int(stats.get("post_action_type_range_filtered_count", 0) or 0):
-            filtered_parts.append(f"유형 범위 필터 {int(stats.get('post_action_type_range_filtered_count', 0) or 0)}개")
-        if filtered_parts:
-            summary += "\n" + ",".join(filtered_parts) + "."
-        summary = append_state_mismatch_summary(summary, stats)
+    summary = append_scan_post_action_summary(summary, stats)
     details = []
     if post.get("moved_failed"):
         details.append(f"실패 스크린샷 {post['moved_failed']}장을 failed 폴더로 이동했습니다.")
@@ -472,16 +453,17 @@ def _on_vision_done(self, stats):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("⚡  계산 시작")
         self._update_inventory_status()
-        QMessageBox.information(
+        show_scan_completion(
             self.dialog_parent,
             "인벤토리 데이터가 생성됨",
             summary + "\n\n이번에는 캐릭터 우선순위를 설정하지 않아 가방 기록만 갱신했으며, 장비 세팅 계산은 수행하지 않았습니다.",
+            stats,
         )
         self._pending_parse_only = False
         return
     from PySide6.QtCore import QTimer
 
-    QMessageBox.information(self.dialog_parent, "스크린샷 분석 완료", summary)
+    show_scan_completion(self.dialog_parent, "스크린샷 분석 완료", summary, stats)
     QTimer.singleShot(100, self._start_allocation_worker)
 
 

@@ -65,6 +65,7 @@ def communicate_progress(
     process: subprocess.Popen[bytes], payload: bytes, *, timeout: float,
     max_output_bytes: int, checkpoint: Callable[[], None],
     progress_callback: Callable[[Mapping[str, Any]], None],
+    total_timeout: float | None = None,
 ) -> tuple[bytes, int]:
     """Drain both pipes concurrently; only the owner executes user callbacks."""
     assert process.stdin is not None and process.stdout is not None and process.stderr is not None
@@ -121,13 +122,17 @@ def communicate_progress(
     finished: set[str] = set()
     started: list[threading.Thread] = []
     deadline = time.monotonic() + timeout
+    hard_deadline = time.monotonic() + (timeout if total_timeout is None else total_timeout)
     next_checkpoint = 0.0
 
     def deliver(line: bytes) -> None:
+        nonlocal deadline
         event = decode_progress(line)
         if event is not None:
             checkpoint()
             progress_callback(event)
+            if total_timeout is not None:
+                deadline = time.monotonic() + timeout
 
     try:
         for worker in workers:
@@ -141,7 +146,7 @@ def communicate_progress(
             if now >= next_checkpoint:
                 checkpoint()
                 next_checkpoint = time.monotonic() + _CHECKPOINT_SECONDS
-            remaining = deadline - time.monotonic()
+            remaining = min(deadline, hard_deadline) - time.monotonic()
             if remaining <= 0:
                 raise NativeStreamError("독립 분석 코어 계산 시간 초과")
             try:

@@ -1,44 +1,56 @@
-# 格式化倒带角色选择卡的只读计算方案摘要。
-"""Presentation helpers for rewind role-selection cards."""
-
+# 格式化倒带角色卡的评分、槽位名称与完整提示。
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QToolButton
+from dataclasses import dataclass
 
-from src.app.theme import GRADE_COLORS, themed_style
 from src.domain.allocation_rating import loadout_total_grade
+from src.domain.rewind_loadout import RewindSlotReference, finite_score
+from src.domain.role_name_order import role_name_sort_key
 from src.services.rewind_shape_recommendation_service import RewindTargetRole
 
 
-def configure_rewind_role_score_card(
-    card: QToolButton,
-    role: RewindTargetRole,
-) -> QLabel:
-    """Reserve one score row and color it like complete loadouts."""
+@dataclass(frozen=True, slots=True)
+class RewindRoleCardPresentation:
+    score: float | None
+    score_text: str
+    grade: str
+    slot_text: str
+    detail: str
+    slot_detail: str
+    can_switch: bool
 
-    card.setText(role.name)
-    card.setProperty("rewindCalculationScore", role.calculation_score)
-    card.setFixedSize(116, 132)
-    label = QLabel(card)
-    label.setObjectName("rewindRoleCalculationScore")
-    label.setAlignment(Qt.AlignCenter)
-    label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-    label.setGeometry(4, 108, 108, 18)
-    if role.calculation_score is None:
-        label.setText("계산 방안 없음")
-        label.setStyleSheet(themed_style("color:#8b949e;font-size:10px;border:none;background:transparent;padding:0"))
-        card.setToolTip(f"{role.name}\n아직 저장된 장비 세팅 계산 점수가 없습니다")
-        return label
-    grade = loadout_total_grade(role.calculation_score)
-    color = GRADE_COLORS.get(grade, "#58a6ff")
-    score = f"{role.calculation_score:.2f}".rstrip("0").rstrip(".")
-    label.setText(f"최고 점수 {score} · {grade}")
-    label.setStyleSheet(
-        f"color:{color};font-size:11px;font-weight:800;"
-        "border:none;background:transparent;padding:0"
-    )
-    card.setToolTip(
-        f"{role.name}\n현재 계산 장비 세팅 최고 점수: {score} ({grade})"
-    )
-    return label
+
+def rewind_role_sort_key(role: RewindTargetRole):
+    scores = [score for slot in role.slots if (score := finite_score(slot.score)) is not None]
+    highest = max(scores) if scores else None
+    return (highest is None, -highest if highest is not None else 0,
+            role_name_sort_key(role.name), role.character_id)
+
+
+def rewind_role_card_presentation(
+    role: RewindTargetRole, selected_reference: RewindSlotReference | None,
+) -> RewindRoleCardPresentation:
+    slot = next((row for row in role.slots if row.reference == selected_reference), None)
+    score = slot.score if slot else None
+    grade = loadout_total_grade(score) if score is not None else ""
+    if score is not None:
+        score_text = f"{score:.2f}".rstrip("0").rstrip(".")
+        if len(score_text) > 10:
+            score_text = f"{score:.3g}"
+    elif not role.slots or (slot and slot.state == "empty"):
+        score_text = "방안 없음"
+    else:
+        score_text = "점수 데이터 부족" if slot else "슬롯 선택 대기"
+    if not role.slots:
+        caption = "장비 세팅 없음"
+    elif slot is None:
+        caption = "슬롯 선택"
+    else:
+        caption = slot.slot_name
+    if slot is not None:
+        exact_score = f"{score:g}점 ({grade})" if score is not None else score_text
+        detail = f"{role.name}\n{slot.slot_name}：{exact_score}\n{slot.reason}"
+    else:
+        detail = f"{role.name}\n{score_text}\n{caption}"
+    slot_detail = f"{role.name}의 장비 세팅 슬롯 전환\n{detail}" if role.slots else detail
+    return RewindRoleCardPresentation(score, score_text, grade, caption, detail, slot_detail, bool(role.slots))

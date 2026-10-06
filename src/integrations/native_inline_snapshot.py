@@ -6,7 +6,7 @@ from src.integrations.nte_core_protocol import NteCoreProtocolError
 INLINE_RAW_CAPABILITY = "native_snapshot_inline_raw_v1"
 _PROJECTION_FIELDS = frozenset({
     "items", "profiles", "characters", "referencedItemUids", "projectionMissing",
-    "projectionComplete", "statProvenance", "rawRecords",
+    "projectionComplete", "statProvenance", "rawRecords", "battleEquipment",
 })
 
 

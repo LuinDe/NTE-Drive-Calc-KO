@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QMessageBox, QStackedWidget, QWidget
 
 from src.features.toolbox.cultivation_page import CultivationCalculatorPage
 from src.services.cultivation_planner_service import CultivationPlannerService
+from src.services.cultivation_history_service import CultivationHistoryService
 from src.services.cultivation_owned_material_import import ImportedOwnedMaterials
 from src.services.rewind_shape_recommendation_service import (
     RewindShapeRecommendationService,
@@ -43,6 +44,7 @@ class ToolboxDependencies:
     cultivation_context_identity: Callable[[], object] | None = None
     cultivation_asset_root: Callable[[], Path] | None = None
     cultivation_material_importer: Callable[[], ImportedOwnedMaterials] | None = None
+    cultivation_history_service_factory: Callable[[], CultivationHistoryService] | None = None
 
     def rewind_service(self) -> RewindShapeRecommendationService:
         return self.rewind_service_factory()
@@ -67,27 +69,33 @@ class CultivationToolboxNavigation:
         self.identity: object | None = self._identity()
 
     def open(self) -> None:
+        current_identity = self._identity()
+        if self.page is not None and current_identity != self.identity:
+            self.discard()
         if self.page is None:
+            history_service = None
             try:
                 service = self.dependencies.cultivation_service_factory()
+                history_service = (self.dependencies.cultivation_history_service_factory()
+                                   if self.dependencies.cultivation_history_service_factory is not None else None)
+                self.page = CultivationCalculatorPage(
+                    service,
+                    self.stack,
+                    context_identity=self._identity,
+                    material_importer=self.dependencies.cultivation_material_importer,
+                    history_service=history_service,
+                    asset_root=(self.dependencies.cultivation_asset_root()
+                                if self.dependencies.cultivation_asset_root is not None else None),
+                )
             except Exception as exc:
+                if history_service is not None:
+                    history_service.close()
                 QMessageBox.warning(
                     self.dialog_parent,
                     "육성 계산기",
                     f"육성 데이터 읽기 실패: {exc}",
                 )
                 return
-            self.page = CultivationCalculatorPage(
-                service,
-                self.stack,
-                context_identity=self._identity,
-                material_importer=self.dependencies.cultivation_material_importer,
-                asset_root=(
-                    self.dependencies.cultivation_asset_root()
-                    if self.dependencies.cultivation_asset_root is not None
-                    else None
-                ),
-            )
             self.page.back_requested.connect(self.show_home)
             self.stack.addWidget(self.page)
             self.identity = self._identity()
@@ -115,7 +123,10 @@ class CultivationToolboxNavigation:
 
     def _identity(self) -> object | None:
         factory = self.dependencies.cultivation_context_identity
-        return factory() if factory is not None else None
+        try:
+            return factory() if factory is not None else None
+        except (OSError, RuntimeError):
+            return None
 
 
 __all__ = [

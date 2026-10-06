@@ -9,13 +9,29 @@ from pathlib import Path
 from typing import Any
 
 
+@lru_cache(maxsize=8)
+def _read_manifest(path: str, identity: tuple[int, int, int]) -> dict[str, Any]:
+    # identity participates in the cache key when a resource bundle is replaced.
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=8192)
+def _resolve_asset(root: Path, relative: str, identity: tuple[int, int, int]) -> Path | None:
+    path = (root / relative).resolve()
+    if root != path and root not in path.parents:
+        return None
+    return path if path.is_file() else None
+
+
 class GameUiAssetCatalog:
     def __init__(self, asset_root: str | Path) -> None:
         self.asset_root = Path(asset_root).expanduser().resolve()
         manifest_path = self.asset_root / "manifest.json"
+        info = manifest_path.stat() if manifest_path.is_file() else None
+        self._manifest_identity = (info.st_ino, info.st_size, info.st_mtime_ns) if info is not None else (0, 0, 0)
         self._manifest: dict[str, Any] = (
-            json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest_path.is_file()
+            _read_manifest(str(manifest_path), self._manifest_identity)
+            if info is not None
             else {
                 "characters": {}, "character_arts": {}, "attributes": {},
                 "equipment_items": {},
@@ -25,15 +41,11 @@ class GameUiAssetCatalog:
             }
         )
 
-    @lru_cache(maxsize=2048)
     def _resolve(self, group: str, key: str) -> Path | None:
         relative = self._manifest.get(group, {}).get(key)
         if not isinstance(relative, str):
             return None
-        path = (self.asset_root / relative).resolve()
-        if self.asset_root != path and self.asset_root not in path.parents:
-            return None
-        return path if path.is_file() else None
+        return _resolve_asset(self.asset_root, relative, self._manifest_identity)
 
     def character_icon(self, character_id: int) -> Path | None:
         return self._resolve("characters", str(character_id))

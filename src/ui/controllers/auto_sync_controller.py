@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QMessageBox
 
 from src.integrations.game_process_watcher import GameProcessWatcher
+from src.ui.controllers.sync_recovery import SyncRecovery
 
 
 class AutoSyncController(QObject):
@@ -24,6 +25,7 @@ class AutoSyncController(QObject):
         self._watcher_factory = watcher_factory
         self._submit_stop = submit_stop or self._background
         self._closed = False
+        self._maintenance = False
         self._started = False
         self._key = None
         self._watcher = None
@@ -32,6 +34,7 @@ class AutoSyncController(QObject):
         self._probe = None
         self._probe_context = None
         self._attempt = None
+        self._recovery = SyncRecovery()
         self._stopping = None
         self._stop_failed = False
         self._retry_cancelled = False
@@ -77,7 +80,7 @@ class AutoSyncController(QObject):
                 return 'checking_game'
             if self._probe.native_load.files is False:
                 return 'waiting_game_exit' if self._probe.game_running else 'waiting_deployment'
-            if not self._probe.game_running:
+            if self._probe.game_running is False:
                 return 'waiting_game'
             if not (self._probe.core_available and self._probe.native_inventory.handshake):
                 return 'waiting_component'
@@ -95,7 +98,7 @@ class AutoSyncController(QObject):
     def observe_probe(self, probe):
         self._probe = probe
         self._probe_context = self._context()
-        if self.policy.allowed("native_sync") and not probe.game_running:
+        if self.policy.allowed("native_sync") and probe.game_running is False:
             self._stop_inventory()
         self.refresh()
 
@@ -195,8 +198,12 @@ class AutoSyncController(QObject):
     def refresh(self):
         if self._closed or not self._started:
             return
+        if self._maintenance:
+            self.render()
+            return
         key = self._context()
         if key != self._key:
+            self._recovery.reset()
             if self._key is not None:
                 self._stop_inventory()
             self._key = key
@@ -219,7 +226,7 @@ class AutoSyncController(QObject):
             identity = self._process
         else:
             probe = self._probe
-            ready = bool(self._probe_context == key and probe and probe.game_running
+            ready = bool(self._probe_context == key and probe and probe.game_running is not False
                          and not self.policy.settings.pending_cleanup
                          and probe.native_load.files is not False
                          and probe.core_available and probe.native_inventory.handshake)
@@ -227,11 +234,15 @@ class AutoSyncController(QObject):
             if not ready:
                 self._attempt = None
         service = self.window._inventory_sync_service
-        if (ready and self._stopping is None and not self._stop_failed and not self._retry_cancelled
+        can_start = (ready and self._stopping is None and not self._stop_failed and not self._retry_cancelled
                 and not self.window.work_mode_controller.is_transitioning
                 and not (native and self.window.battle_report_controller.is_running())
-                and not (service and service.is_running)
-                and self._attempt != (key, identity)):
+                and not (service and service.is_running))
+        if can_start and native and getattr(getattr(service, 'state', None), 'stop_reason', None) == 'connection_lost':
+            can_start = self._recovery.ready(service)
+            if can_start:
+                self._attempt = None
+        if can_start and self._attempt != (key, identity):
             self._attempt = key, identity
             self.window._start_inventory_sync(automatic=True)
         self.render()
@@ -257,6 +268,20 @@ class AutoSyncController(QObject):
                     pass  # The UI can be destroyed after cancellation but before join finishes.
 
         self._submit_stop(finish)
+
+    def suspend_for_plugin_update(self):
+        """GUI-thread entry; preserve saved preference and stop the current owner."""
+        self._maintenance = True
+        self._stop_inventory()
+        self.render()
+
+    def resume_after_plugin_update(self, *, restore=True):
+        self._maintenance = False
+        self._attempt = None
+        self._probe = None
+        self._probe_context = None
+        if restore:
+            self.refresh()
 
     def _stopped(self, result):
         service, error = result
@@ -302,11 +327,12 @@ class AutoSyncController(QObject):
         dialog.deleteLater()
 
     def restart(self):
-        if self._closed or self.window.battle_report_controller.is_running():
+        if self._closed or self._maintenance or self.window.battle_report_controller.is_running():
             return
         capability = "native_sync" if self.policy.allowed("native_sync") else "packet_capture"
         if not self.policy.allowed(capability, automatic=True):
             return
+        self._recovery.reset()
         self._attempt = None
         self._retry_cancelled = False
         self._stop_failed = False
@@ -331,6 +357,7 @@ class AutoSyncController(QObject):
             return
         if state.source_snapshot_ready and state.phase == "listening":
             self._restarting = False
+            self._recovery.reset()
         self.state_changed.emit(state)
         self.render()
 
@@ -384,12 +411,14 @@ class AutoSyncController(QObject):
             "먼저 환경 검사를 표시하고, 준비 확인 후 게임 장면에 들어가면 자동으로 데이터를 읽어 저장합니다." if native else
             "먼저 패킷 캡처 조건 검사를 표시하고, 확인 후 게임에 로그인하면 데이터가 자동으로 저장됩니다."
         )
-        button.setEnabled(not self._stopping and (not battle or not settings.auto_sync_enabled))
+        button.setEnabled(not self._maintenance and not self._stopping and (not battle or not settings.auto_sync_enabled))
         hint = "먼저 전투 리포트를 종료한 후 동기화를 다시 시작하세요." if battle and settings.auto_sync_enabled else ""
         self.window.home_sync_action_hint.setText(hint)
         self.window.home_sync_action_hint.setVisible(bool(hint))
         detail = None
-        if not online:
+        if self._maintenance:
+            detail = '플러그인 업데이트 중이라 동기화를 잠시 멈췄습니다; 저장된 가방은 계속 사용할 수 있습니다.'
+        elif not online:
             detail = "오프라인 모드입니다. 저장된 가방을 사용합니다."
         elif settings.paused:
             detail = "연결이 일시 중지되었습니다; 「자동 동기화 재개」를 클릭해 조건을 점검하면 되며, 작업 모드를 다시 선택할 필요는 없습니다."
@@ -409,6 +438,10 @@ class AutoSyncController(QObject):
             detail = "게임 시작 대기 중; 로그인하여 게임 장면에 진입한 후, 가방과 캐릭터 데이터 동기화가 완료될 때까지 기다려 주세요."
         elif not native and self._process is None:
             detail = self._detail or "게임 시작 대기 중; 게임이 발견되면 자동으로 가방 모니터링을 시작합니다."
+        elif self._recovery.waiting:
+            detail = "네이티브 연결이 끊어져 가방 모니터링의 자동 복구를 기다리는 중입니다; 저장된 가방은 계속 사용할 수 있습니다."
+        elif state is not None and state.phase == "stopped" and not service.is_running:
+            detail = "가방 동기화 모니터링이 중지되어 이번에는 더 이상 데이터를 받지 않습니다. “동기화 재시작”을 클릭하세요; 저장된 가방은 계속 계산에 사용할 수 있습니다."
         elif state is None or not service.is_running:
             detail = (state.message if state and state.phase == "error" else
                       "게임 내 컴포넌트 준비 대기 중; 게임 장면에 진입하여 동기화가 완료될 때까지 기다려 주세요." if native else self._detail or "가방 모니터링을 준비하는 중입니다.")
@@ -421,7 +454,9 @@ class AutoSyncController(QObject):
             self.window.home_sync_detail.setText(detail)
         badge = getattr(self.window, "home_sync_badge", None)
         if badge is not None:
-            if not online or not settings.auto_sync_enabled or settings.paused:
+            if self._maintenance:
+                title, tone = '플러그인 업데이트 중', 'active'
+            elif not online or not settings.auto_sync_enabled or settings.paused:
                 title, tone = "동기화 꺼짐", "neutral"
             elif self._stopping:
                 title, tone = "마무리 중", "active"
@@ -441,10 +476,14 @@ class AutoSyncController(QObject):
                 title, tone = "게임 대기 중", "warning"
             elif not native and self._process is None:
                 title, tone = "게임 대기 중", "warning"
+            elif self._recovery.waiting:
+                title, tone = "복구 대기 중", "warning"
             elif state and state.phase == "error":
                 title, tone = "동기화 이상", "error"
             elif native and preparation == 'waiting_component':
                 title, tone = "컴포넌트 대기 중", "warning"
+            elif state and state.phase == "stopped" and not service.is_running:
+                title, tone = "동기화 중지됨", "warning"
             elif state and state.phase == "listening" and state.source_snapshot_ready:
                 title, tone = "지속 수신 대기", "success"
             elif state and state.phase in {"collecting", "saving"}:

@@ -3,15 +3,18 @@
 
 from __future__ import annotations
 
-from src.features.input_operation_entry import request_input_entry, show_input_unavailable
+from src.features.input_operation_entry import request_input_entry, show_input_unavailable, show_sync_required
 
 from collections.abc import Callable
+from concurrent.futures import CancelledError
+from threading import Event
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QMessageBox, QProgressBar, QProgressDialog
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtWidgets import QLabel, QMessageBox, QProgressBar, QProgressDialog
 
 from src.app.workers import WorkerThread
+from src.app.window_geometry import fit_dialog_to_available_screen
 from src.observability.context import OperationContext
 from src.integrations.nte_core import is_mods_plugin_unavailable_error
 from src.features.inventory.equipment_assembly_dialogs import (
@@ -56,6 +59,10 @@ def _equipment_failure_details(
     """Render one concrete failure category without conflating pipe states."""
 
     message = str(error or "알 수 없는 오류")
+    if failure_kind == "recovery_exhausted":
+        return "컴포넌트 상태 갱신 중 자동 복구를 중지했습니다. 이미 전송된 단계는 그대로 유지되니, 동기화를 기다려 확인한 뒤 계속하세요."
+    if failure_kind == "cancelled":
+        return "후속 장착을 중지했습니다. 이미 전송된 작업은 롤백되지 않으니 게임 내 실제 장비를 확인하세요."
     if failure_kind == "plugin_unavailable":
         return f"네이티브 장비 채널을 사용할 수 없습니다: {message}. 작업 모드 검사 상세에서 현재 네이티브 컴포넌트 연결과 장비 기능을 대조하세요."
     if failure_kind == "plugin_busy":
@@ -89,7 +96,7 @@ def _equipment_assembly_is_running(window: Any) -> bool:
 
 
 def _run_nte_core_equipment_apply(
-    self: Any,
+    service: BulkEquipmentApplyService,
     role_names: list[str],
     *,
     slot_ids: list[int] | None = None,
@@ -97,32 +104,7 @@ def _run_nte_core_equipment_apply(
     job_id: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    sync_service = getattr(self, "_inventory_sync_service", None)
-    if sync_service is None:
-        raise RuntimeError("가방 동기화 서비스가 아직 시작되지 않았습니다. 먼저 홈에서 백그라운드 동기화를 시작하세요")
-    app_context = getattr(self, "app_context", None)
-    database_path = (
-        app_context.account.user_database_path if app_context is not None else getattr(self, "user_database_path", None)
-    )
-    if database_path is None:
-        raise RuntimeError("고속 장착에 현재 계정 데이터베이스 의존성이 없습니다")
-    return BulkEquipmentApplyService(
-        database_path,
-        sync_service,
-        dao_factory=UserDataDao,
-        apply_service_factory=EquipmentApplyService,
-        operation_guard=getattr(self, "operation_guard", None),
-        operation_context=OperationContext.create(
-            "equipment_apply",
-            account_id=(
-                app_context.account.active_account_id
-                if app_context is not None
-                else None
-            ),
-            context_generation=(app_context.generation if app_context is not None else None),
-            job_id=job_id,
-        ),
-    ).run(
+    return service.run(
         role_names,
         slot_ids=slot_ids,
         identity_overrides=identity_overrides,
@@ -175,12 +157,50 @@ def _start_nte_core_equipment_apply(
         return
     sync = getattr(self, "_inventory_sync_service", None)
     if sync is None or not sync.is_running:
-        show_input_unavailable(self, "고속 장착", "게임 장비 연결이 아직 준비되지 않았습니다. 검사 상세 정보를 확인하세요; 컴포넌트를 배포해야 하면 먼저 게임을 완전히 종료하고, 배포가 완료된 후 다시 시작해 게임 장면에 진입하세요.")
+        show_sync_required(self, "고속 장착")
         return
     current_worker = getattr(self, "_equipment_apply_worker", None)
     if current_worker is not None and current_worker.isRunning():
         QMessageBox.information(self, "장착 중", "이미 장착 작업이 실행 중입니다. 명령 전송이 끝날 때까지 기다리세요.")
         return
+    hotkey_manager = getattr(self, "global_hotkey_manager", None)
+    hotkey_owner = "fast_equipment_apply"
+    if getattr(hotkey_manager, "active_owner", None) not in (None, hotkey_owner):
+        QMessageBox.information(self, "고속 장착", "현재 전역 중지 키를 다른 작업이 사용 중입니다. 먼저 그 작업을 중지하세요.")
+        return
+    configuration = getattr(hotkey_manager, "configuration", None)
+    stop_hotkey = str(getattr(configuration, "stop", "F12"))
+    stop_hint = f"이 창을 닫거나 {stop_hotkey} 키를 눌러 후속 장착을 중지하세요."
+
+    # Freeze all account dependencies on the controller thread, before work starts.
+    app_context = getattr(self, "app_context", None)
+    generation = app_context.generation if app_context is not None else None
+    account_id = app_context.account.active_account_id if app_context is not None else None
+    database_path = app_context.account.user_database_path if app_context is not None else getattr(self, "user_database_path", None)
+    if database_path is None:
+        show_input_unavailable(self, "고속 장착", "현재 계정 데이터베이스가 아직 준비되지 않았습니다")
+        return
+    cancel_event = Event()
+
+    def is_current():
+        return app_context is None or (
+            getattr(self, "app_context", None) is app_context
+            and app_context.generation == generation
+            and app_context.account.active_account_id == account_id
+            and app_context.account.user_database_path == database_path
+        )
+
+    def check_current():
+        if not is_current():
+            raise CancelledError("계정 컨텍스트가 변경되었습니다")
+
+    service = BulkEquipmentApplyService(
+        database_path, sync, dao_factory=UserDataDao, apply_service_factory=EquipmentApplyService,
+        operation_guard=getattr(self, "operation_guard", None), cancel_event=cancel_event,
+        check_current=check_current,
+        operation_context=OperationContext.create("equipment_apply", account_id=account_id,
+                                                  context_generation=generation, job_id=job_id),
+    )
 
     progress_state: dict[str, Any] = {
         "current": 0,
@@ -189,28 +209,36 @@ def _start_nte_core_equipment_apply(
         "show_progress_bar": True,
     }
     progress_dialog = QProgressDialog(
-        progress_state["message"],
+        "",
         "",
         0,
         progress_state["total"],
         self,
     )
     progress_dialog.setWindowTitle("고속 장착 진행률")
-    progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+    progress_label = QLabel(f"{progress_state['message']}\n{stop_hint}", progress_dialog)
+    progress_label.setWordWrap(True)
+    progress_label.setAlignment(Qt.AlignCenter)
+    progress_dialog.setLabel(progress_label)
     progress_dialog.setCancelButton(None)
+    progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
     progress_dialog.setAutoClose(False)
     progress_dialog.setAutoReset(False)
     progress_dialog.setMinimumDuration(0)
     progress_dialog.setValue(0)
-    progress_dialog.show()
+    fit_dialog_to_available_screen(progress_dialog, QSize(420, 120))
 
     progress_timer = QTimer(progress_dialog)
 
     def update_progress_dialog() -> None:
+        if cancel_event.is_set():
+            progress_timer.stop()
+            progress_dialog.close()
+            return
         total = max(1, int(progress_state.get("total", 1)))
         progress_dialog.setMaximum(total)
         progress_dialog.setValue(min(total, max(0, int(progress_state.get("current", 0)))))
-        progress_dialog.setLabelText(str(progress_state.get("message") or "고속 장착 중…"))
+        progress_dialog.setLabelText(f"{progress_state.get('message') or '正在极速装配…'}\n{stop_hint}")
         progress_bar = progress_dialog.findChild(QProgressBar)
         if progress_bar is not None:
             progress_bar.setVisible(bool(progress_state.get("show_progress_bar", True)))
@@ -219,16 +247,27 @@ def _start_nte_core_equipment_apply(
     progress_timer.start(80)
 
     def update_progress(payload: dict) -> None:
-        progress_state.update(payload)
+        if is_current():
+            progress_state.update(payload)
+
+    def request_cancel():
+        cancel_event.set()
+
+    progress_dialog.canceled.connect(request_cancel)
+    progress_dialog.rejected.connect(request_cancel)
 
     def close_progress_dialog() -> None:
+        if hotkey_manager is not None:
+            hotkey_manager.stop(owner=hotkey_owner)
+        progress_dialog.canceled.disconnect(request_cancel)
+        progress_dialog.rejected.disconnect(request_cancel)
         progress_timer.stop()
         progress_dialog.close()
         progress_dialog.deleteLater()
 
     worker = WorkerThread(
         target=lambda: _run_nte_core_equipment_apply(
-            self,
+            service,
             role_names,
             slot_ids=slot_ids,
             identity_overrides=identity_overrides,
@@ -241,6 +280,8 @@ def _start_nte_core_equipment_apply(
 
     def on_result(report: dict) -> None:
         close_progress_dialog()
+        if not is_current():
+            return
         preflight_errors = report.get("preflight_errors") or []
         if preflight_errors:
             details = "\n".join(
@@ -256,6 +297,8 @@ def _start_nte_core_equipment_apply(
         applied = report.get("applied") or []
         requests = report.get("identity_requests") or []
         summary, role_details = build_fast_apply_completion_summary(applied)
+        confirmed_count = sum(bool(row.get("verified")) and not row.get("scoped_verified") for row in applied)
+        partial_summary = f"이전에 캐릭터 {len(applied)}명의 장착 명령을 전송했으며, 그중 {confirmed_count}명이 확인되었습니다"
         if report.get("failed_role"):
             error_message = str(report.get("error") or "알 수 없는 오류")
             failure_kind = str(report.get("failure_kind") or "apply_error")
@@ -277,15 +320,18 @@ def _start_nte_core_equipment_apply(
                     "네이티브 수집 컴포넌트;\n"
                     "2. 배포가 끝나면 게임을 시작해 게임 장면에 진입하고, 작업 공간에서 동기화를 재시작해 “지속 감시”를 기다리세요;\n"
                     "3. 위 확인을 마친 뒤 우상단 “고속 장착”을 클릭해 다시 실행하세요.\n\n"
-                    f"이전에 {len(applied)}명을 확인했으며 작업 로그를 저장했습니다. 이번에는 바로 재시도하지 않습니다.",
+                    f"{partial_summary}. 작업 로그를 저장했습니다. 이번에는 바로 재시도하지 않습니다.",
                 )
                 return
             reason = _equipment_failure_details(failure_kind, error_message)
+            if failure_kind in {"cancelled", "outcome_unknown", "core_request_timeout"}:
+                QMessageBox.warning(self, "장착 중지됨", f"{reason}\n\n{partial_summary}。")
+                return
             retry = QMessageBox.question(
                 self,
                 "장착 일시 중지",
                 f"작업 #{report.get('job_id')}이(가) [{report['failed_role']}]에서 중지되었습니다.\n{reason}\n\n"
-                f"이전에 {len(applied)}명을 확인했으며 작업 로그를 저장했습니다. 실패한 캐릭터를 재시도하고 계속할까요?",
+                f"{partial_summary}. 작업 로그를 저장했습니다. 실패한 캐릭터를 재시도하고 계속할까요?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -299,6 +345,11 @@ def _start_nte_core_equipment_apply(
                 refresh()
             return
         snapshot_failure = report.get("snapshot_wait_failure")
+        if report.get("repair_errors") and not isinstance(snapshot_failure, dict):
+            details = "\n".join(f"• [{row.get('role_name', '未知角色')}]: {row.get('error', '复核不一致')}"
+                                for row in report["repair_errors"])
+            QMessageBox.warning(self, "장착 재검토 실패", f"{summary}.\n\n{details}\n\n동기화한 뒤 실제 장비를 확인하세요.")
+            return
         if isinstance(snapshot_failure, dict):
             attempt = int(snapshot_failure.get("attempt") or 1)
             reason = _equipment_failure_details(
@@ -326,11 +377,23 @@ def _start_nte_core_equipment_apply(
 
     def on_error(message: str) -> None:
         close_progress_dialog()
+        if not is_current():
+            return
+        if cancel_event.is_set():
+            QMessageBox.information(self, "장착 중지됨", "후속 장착을 중지했습니다. 이미 전송된 작업은 그대로 유지되니 동기화한 뒤 실제 장비를 확인하세요.")
+            return
         show_input_unavailable(self, "고속 장착", str(message))
 
     worker.result_ready.connect(on_result)
     worker.error.connect(on_error)
-    worker.start()
+    try:
+        if hotkey_manager is not None:
+            hotkey_manager.start(owner=hotkey_owner, on_stop=request_cancel)
+        progress_dialog.show()
+        worker.start()
+    except Exception:
+        close_progress_dialog()
+        raise
 
 
 def _confirm_automatic_assembly_fallback(

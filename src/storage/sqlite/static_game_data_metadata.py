@@ -1,7 +1,7 @@
 # 静态游戏数据库版本与摘要表清单。
 """Shared metadata for the normalized static game database."""
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 MINIMUM_SUPPORTED_SCHEMA_VERSION = 31
 
 SUMMARY_TABLES = (
@@ -65,6 +65,7 @@ SUMMARY_TABLES = (
     "fork_lottery_campaign",
     "fork_refinement_parameter_value",
     "fork_permanent_property",
+    "fork_permanent_review",
     "character_cultivation_guide",
     "character_cultivation_fork_recommendation",
     "character_cultivation_attribute_recommendation",

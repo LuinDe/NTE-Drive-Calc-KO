@@ -38,7 +38,7 @@ def build_timeline_tooltip(
         )
         source = (
             f"\n출처 스킬: {hit.skill_name}"
-            if hit.skill_name not in {"", damage_name, "미식별 스킬"}
+            if hit.skill_name not in {"", damage_name, "미식별 스킬", "未识别技能"}
             else ""
         )
         return (
@@ -54,7 +54,7 @@ def build_timeline_tooltip(
         source = (
             f"\n출처 스킬: {group.source_skill_name}"
             if group.source_skill_name
-            not in {"", group.damage_name, "미식별 스킬"}
+            not in {"", group.damage_name, "미식별 스킬", "未识别技能"}
             else ""
         )
         vital_group = group.channel_key in {

@@ -288,7 +288,7 @@ def export_account_data(manager: AccountManager, account_id: str, target_zip: Pa
             ),
         )
         for child in sorted(source_root.iterdir()):
-            if child.name in {"logs", "scanned_images"}:
+            if child.name in {"logs", "scanned_images", ".migration-backups"}:
                 continue
             if child.is_dir():
                 _write_tree_to_zip(zf, child, f"account/{child.name}")
@@ -437,18 +437,18 @@ def show_account_manager_dialog(parent, style_sheet: str, manager: AccountManage
     layout.addWidget(name_edit)
 
     btn_row = QHBoxLayout()
-    add_btn = QPushButton("추가")
-    add_btn.setObjectName("btnAction")
+    add_btn = QPushButton("새로 만들기")
+    add_btn.setObjectName("btnPrimary")
     rename_btn = QPushButton("이름 저장")
     rename_btn.setObjectName("btnAction")
-    delete_btn = QPushButton("계정 삭제")
+    delete_btn = QPushButton("삭제")
     export_btn = QPushButton("데이터 내보내기")
     export_btn.setObjectName("btnAction")
     import_btn = QPushButton("데이터 가져오기")
     import_btn.setObjectName("btnAction")
     delete_btn.setObjectName("btnDanger")
     close_btn = QPushButton("닫기")
-    for btn in (add_btn, rename_btn, export_btn, import_btn, delete_btn):
+    for btn in (rename_btn, export_btn, import_btn, add_btn, delete_btn):
         btn_row.addWidget(btn)
     btn_row.addStretch()
     btn_row.addWidget(close_btn)
@@ -470,7 +470,7 @@ def show_account_manager_dialog(parent, style_sheet: str, manager: AccountManage
         name_edit.setText(account.get("name", ""))
 
     def add_account():
-        name, ok = QInputDialog.getText(dialog, "계정 추가", "계정 이름을 입력하세요:")
+        name, ok = QInputDialog.getText(dialog, "새 계정", "계정 이름을 입력하세요:")
         if not ok or not name.strip():
             return
         account_id = manager.create_account(name.strip())

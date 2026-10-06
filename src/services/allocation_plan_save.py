@@ -30,10 +30,19 @@ def save_allocation_plans(*, database_path, static_database_path, static_identit
             checkpoint()
             arguments = {key: value for key, value in row.items() if key != "slot_id"}
             plan = bridge.prepare_role_plan(**arguments)
-            slot = user_dao.get_loadout_slot(row["slot_id"])
-            if slot is None or int(slot["character_id"]) != plan.character_id:
-                raise RuntimeError("대상 장비 구성의 슬롯이 변경되었습니다. 다시 선택하세요.")
-            prepared.append({**plan.as_record(), "slot_id": row["slot_id"]})
+            slot_id = row["slot_id"]
+            if slot_id is None:
+                if user_dao.list_loadout_slots(plan.character_id):
+                    raise RuntimeError("대상 장비 구성의 슬롯이 변경되었습니다. 다시 선택하세요.")
+            else:
+                slot = user_dao.get_loadout_slot(slot_id)
+                if slot is None or int(slot["character_id"]) != plan.character_id:
+                    raise RuntimeError("대상 장비 구성의 슬롯이 변경되었습니다. 다시 선택하세요.")
+            prepared.append({
+                **plan.as_record(), "slot_id": slot_id,
+                "comparison_baseline": (row.get("payload") or {}).get("last_diff"),
+                "create_slot_name": row["role_name"] if slot_id is None else None,
+            })
             progress((f"장비 구성 방안 {index}/{len(rows)} 검증 완료", index, len(rows) + 4))
         checkpoint()
         verify_static()

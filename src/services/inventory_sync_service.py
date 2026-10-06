@@ -20,44 +20,15 @@ from src.storage.sqlite.user_data_dao import UserDataDao
 from src.utils.logger import logger
 
 from .inventory_sync_contracts import InventoryCoreClient
+from .inventory_sync_state import InventorySyncState as InventorySyncState, SyncPhase
 from .inventory_sync_runtime import prune_raw_captures, run_inventory_sync
 from .inventory_capture_wait import CaptureWaitMonitor, InventorySyncCancelled, receive_capture_status, require_inventory_operation
 
 
-SyncPhase = Literal[
-    "stopped",
-    "starting",
-    "waiting",
-    "collecting",
-    "saving",
-    "listening",
-    "error",
-]
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-
-
-@dataclass(frozen=True)
-class InventorySyncState:
-    phase: SyncPhase = "stopped"
-    message: str = "가방 동기화가 아직 시작되지 않았습니다"
-    running: bool = False
-    capturing: bool = False
-    pending_item_count: int | None = None
-    added_count: int = 0
-    removed_count: int = 0
-    last_snapshot_id: int | None = None
-    last_item_count: int | None = None
-    last_synced_at_utc: str | None = None
-    source_snapshot_ready: bool = False
-    capture_source: Literal["packet", "native"] = "packet"
-    error: str | None = None
-    error_code: str | None = None
-    character_sync_revision: int = 0
-    character_sync_error: str | None = None
-    updated_at_utc: str = ""
 
 
 @dataclass(frozen=True)
@@ -160,6 +131,8 @@ class InventorySyncService:
         self._scoped_equipment_snapshots: list[ScopedEquipmentSnapshot] = []
         self._pending_runtime_state_deltas: list[tuple[int, tuple[dict[str, Any], ...], int | None, int | None]] = []
         self._stop_requested = threading.Event()
+        self._inventory_observation_cursor = 0
+        self._inventory_observation = None
         self._thread: threading.Thread | None = None
         self._client: InventoryCoreClient | None = None
 
@@ -317,6 +290,16 @@ class InventorySyncService:
         """原生装配批次暂缓读取；旧抓包链维持原有接收行为。"""
         client = self._equipment_client()
         return client.equipment_batch() if self.capture_source == "native" else nullcontext()
+    def equipment_identity(self, *, timeout: float = 2.0):
+        """Expose the native command source, independent of inventory revisions."""
+        client = self._equipment_client()
+        return client.equipment_identity(timeout=timeout) if self.capture_source == "native" else None
+
+    def equipment_recovery_batch(self, *, check_cancelled, timeout: float):
+        client = self._equipment_client()
+        return (client.equipment_batch(check_cancelled=check_cancelled, timeout=timeout)
+                if self.capture_source == "native" else self.equipment_batch())
+
     def equip_one_key(
         self,
         *,
@@ -453,7 +436,7 @@ class InventorySyncService:
         self._stop_requested.clear()
         self._event_ready.clear()
         self._capture_ready.clear()
-        self._state = replace(self._state, source_snapshot_ready=False)
+        self._state = replace(self._state, source_snapshot_ready=False, stop_reason=None)
         self._capture_monitor = CaptureWaitMonitor()
         with self._event_lock:
             self._latest_inventory_event = None
@@ -777,20 +760,22 @@ class InventorySyncService:
     ) -> InventorySyncState:
         """等待首个稳定快照，或等待比装配前更新的稳定快照。"""
 
-        deadline = time.monotonic() + timeout
+        from .inventory_observation_wait import wait_for_snapshot
+
+        return wait_for_snapshot(self, after_snapshot_id=after_snapshot_id, timeout=timeout)
+
+    def inventory_observation_cursor(self) -> int:
         with self._state_condition:
-            while True:
-                snapshot_id = self._state.last_snapshot_id
-                if snapshot_id is not None and (
-                    after_snapshot_id is None or snapshot_id > after_snapshot_id
-                ):
-                    return self._state
-                if self._state.phase == "error" and not self._state.running:
-                    raise RuntimeError(self._state.error or self._state.message)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("새 안정 가방 스냅샷 대기 시간 초과")
-                self._state_condition.wait(remaining)
+            return self._inventory_observation_cursor
+
+    def wait_for_inventory_observation(self, *, after_cursor: int, timeout: float):
+        from .inventory_observation_wait import wait_for_inventory_observation
+
+        return wait_for_inventory_observation(self, after_cursor=after_cursor, timeout=timeout)
+
+    def _record_inventory_observation(self, payload):
+        from .inventory_observation_wait import record_inventory_observation
+        record_inventory_observation(self, payload)
 
     def __enter__(self) -> "InventorySyncService":
         self.start()

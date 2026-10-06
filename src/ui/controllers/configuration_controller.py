@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QTimer
+from src.app.context import CallbackAccountLifecycle
+
 from src.features.configuration.page import (
     add_weight as config_add_weight,
     build_config_page,
@@ -27,14 +30,80 @@ def _page_config(self):
 def _refresh_config_forms(self):
     return config_refresh_config_forms(self, self.app_context.paths.config_dir)
 
-def _confirm_leave_config_page(self):
-    return config_confirm_pending_config_changes(
-        self,
-        self.app_context.paths.config_dir,
-    )
 
-def _confirm_leave_my_role_page(self):
-    return confirm_pending_my_role_changes(self)
+def register_page_configuration_lifecycle(app_context, owners_provider):
+    """Register before other owners: account replacement never crosses an accepted commit."""
+    def stop():
+        owners = tuple(owner for owner in owners_provider() if owner is not None)
+        if any(owner.is_writing() for owner in owners):
+            raise RuntimeError("계정 설정을 제출하는 중입니다. 저장이 완료된 후 계정을 전환하세요.")
+        for owner in owners:
+            owner.close()
+
+    return app_context.register_account_lifecycle(CallbackAccountLifecycle(
+        is_running=lambda: False, stop=stop, rebuild=lambda _account: None, start=lambda: None,
+    ))
+
+def defer_page_transition(window, continuation, *, pages=("config", "my_role")) -> bool:
+    """Return true while a dirty/committing page owns the requested transition."""
+    owners = tuple(owner for owner in (
+        getattr(window, "_basic_weight_controller", None),
+        getattr(window, "_official_role_controller", None),
+    ) if owner is not None and hasattr(owner, "is_writing"))
+    fields = {"config": "_config_dirty", "my_role": "_my_role_dirty"}
+    if getattr(window, "_pending_page_transition", None) is not None:
+        return True
+    if not any(owner.is_writing() for owner in owners) and not any(
+        getattr(window, fields[page], False) for page in pages if page in fields
+    ):
+        return False
+    token = object()
+    context = window.app_context
+    identity = context.account.active_account_id, context.generation
+    window._pending_page_transition = token
+
+    def current():
+        return (getattr(window, "_pending_page_transition", None) is token
+                and (window.app_context.account.active_account_id, window.app_context.generation) == identity)
+
+    def cancel():
+        if getattr(window, "_pending_page_transition", None) is token:
+            window._pending_page_transition = None
+
+    def continue_at(index):
+        if not current():
+            cancel()
+            return
+        writing = next((owner for owner in owners if owner.is_writing()), None)
+        if writing is not None:
+            writing.when_commit_settled(lambda success: continue_at(index) if success else cancel())
+            return
+        if index >= len(pages):
+            def finish():
+                if current():
+                    cancel()
+                    continuation()
+                else:
+                    cancel()
+            QTimer.singleShot(0, finish)
+            return
+        page = pages[index]
+        callback = lambda success: continue_at(index + 1) if success else cancel()
+        if page == "config":
+            allowed = config_confirm_pending_config_changes(window, context.paths.config_dir, completion=callback)
+        elif page == "my_role":
+            allowed = confirm_pending_my_role_changes(window, completion=callback)
+        else:
+            allowed = True
+        if allowed:
+            continue_at(index + 1)
+        elif not any(owner.is_writing() for owner in (
+            getattr(window, "_basic_weight_controller", None), getattr(window, "_official_role_controller", None),
+        ) if owner is not None and hasattr(owner, "is_writing")):
+            cancel()
+
+    continue_at(0)
+    return True
 
 def _switch_config_form(self,name):
     return config_switch_config_form(
@@ -115,8 +184,6 @@ def _save_config_data(self,data):
 class ConfigurationControllerMixin:
     _page_config = _page_config
     _refresh_config_forms = _refresh_config_forms
-    _confirm_leave_config_page = _confirm_leave_config_page
-    _confirm_leave_my_role_page = _confirm_leave_my_role_page
     _switch_config_form = _switch_config_form
     _build_roles_form = _build_roles_form
     _add_weight = _add_weight

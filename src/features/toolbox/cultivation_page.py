@@ -26,8 +26,15 @@ from src.features.toolbox.cultivation_calculator import (
     CultivationCalculatorContent,
 )
 from src.features.toolbox.cultivation_batch_page import CultivationBatchContent
+from src.features.toolbox.cultivation_history_binding import CultivationHistoryDraftBinding
+from src.features.toolbox.cultivation_history_controller import CultivationHistoryController, HistoryOperationResult
+from src.features.toolbox.cultivation_history_view import CultivationHistoryView
+from src.services.cultivation_history_service import CultivationHistoryService
+from src.services.cultivation_history_restore import PreparedHistoryRestore, prepare_history_restore
 from src.services.cultivation_planner_service import CultivationPlannerService
 from src.services.cultivation_owned_material_import import ImportedOwnedMaterials
+from src.services.game_ui_asset_catalog import GameUiAssetCatalog
+from src.integrations.bundled_resources import bundled_game_ui_asset_root
 from src.utils.cultivation_trace import trace_cultivation
 
 
@@ -44,16 +51,26 @@ class CultivationCalculatorPage(QWidget):
         context_identity: Callable[[], object] | None = None,
         asset_root: str | Path | None = None,
         material_importer: Callable[[], ImportedOwnedMaterials] | None = None,
+        history_service: CultivationHistoryService | None = None,
     ) -> None:
         super().__init__(parent)
         self._context_identity = context_identity
         self._initial_identity = context_identity() if context_identity is not None else None
         self._material_importer = material_importer
+        self._service = service
+        self._asset_root = asset_root
+        self._history_service = history_service
+        self._history_controller = (CultivationHistoryController(
+            history_service, context_identity=context_identity or (lambda: None), parent=self,
+        ) if history_service is not None else None)
+        self._history_view: CultivationHistoryView | None = None
+        self._restore_request = 0
         self.setObjectName("cultivationCalculatorPage")
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 10)
         root.setSpacing(8)
-        root.addWidget(self._build_header())
+        self._header = self._build_header()
+        root.addWidget(self._header)
         self._single_available = False
         self._batch_available = False
 
@@ -67,13 +84,15 @@ class CultivationCalculatorPage(QWidget):
         self.mode_stack = _CurrentPageStack(self.scroll)
         self.mode_stack.setObjectName("cultivationCalculatorModeStack")
         self.calculator = CultivationCalculatorContent(
-            service, self.mode_stack, asset_root=asset_root
+            service, self.mode_stack, context_identity=context_identity, asset_root=asset_root,
+            history_binding=self._new_history_binding("single"),
         )
         self.batch_calculator = CultivationBatchContent(
             service,
             context_identity=context_identity,
             parent=self.mode_stack,
             asset_root=asset_root,
+            history_binding=self._new_history_binding("batch"),
         )
         for content in (self.calculator, self.batch_calculator):
             content.owned_materials.set_import_available(material_importer is not None)
@@ -114,9 +133,129 @@ class CultivationCalculatorPage(QWidget):
         self._last_scroll_trace = 0.0
         self._wheel_trace_count = 0
         self.scroll.verticalScrollBar().valueChanged.connect(self._scroll_value_changed)
-        root.addWidget(self.scroll, 1)
+        self._body_stack = QStackedWidget(self)
+        self._body_stack.addWidget(self.scroll)
+        if self._history_service is not None and self._history_controller is not None:
+            history_assets = GameUiAssetCatalog(asset_root if asset_root is not None else bundled_game_ui_asset_root())
+            self._history_view = CultivationHistoryView(
+                self._history_service, self._history_controller, self._body_stack,
+                icon_lookup=history_assets.progression_item_icon,
+            )
+            self._history_view.back_requested.connect(self._leave_history)
+            self._history_view.load_requested.connect(self._load_history)
+            self._history_controller.completed.connect(self._history_operation_completed)
+            self._body_stack.addWidget(self._history_view)
+        root.addWidget(self._body_stack, 1)
         self._set_mode("single")
         self._sync_scroll_extent()
+
+    def _new_history_binding(self, mode: str) -> CultivationHistoryDraftBinding | None:
+        if self._history_service is None or self._history_controller is None:
+            return None
+        binding = CultivationHistoryDraftBinding(self._history_service, self._history_controller, mode=mode, parent=self)
+        binding.saved.connect(self._history_saved)
+        return binding
+
+    def _history_saved(self, summary: object) -> None:
+        if self._history_view is not None:
+            self._history_view.notify_saved(summary)
+
+    def _show_history(self) -> None:
+        if self._history_view is not None:
+            self._cancel_batch_result_transition()
+            self._single_scroll_generation += 1
+            self._header.hide()
+            self._body_stack.setCurrentWidget(self._history_view)
+            self._history_view.refresh()
+
+    def _leave_history(self) -> None:
+        # Returning to editing cancels a pending restore instead of overwriting later edits.
+        self._restore_request = 0
+        if self._history_view is not None:
+            self._history_view.set_restore_busy(False)
+        self._body_stack.setCurrentWidget(self.scroll)
+        self._header.show()
+        self._sync_scroll_extent()
+
+    def _load_history(self, record: object) -> None:
+        if self._history_controller is None or self._restore_request:
+            return
+        self._restore_request = self._history_controller.submit("restore", lambda: prepare_history_restore(self._service, record))
+        if self._history_view is not None:
+            self._history_view.set_restore_busy(True)
+            self._history_view.set_message("기록 설정을 확인하는 중입니다; 기존 초안은 잠시 그대로 유지됩니다.")
+
+    def _history_operation_completed(self, outcome: object) -> None:
+        if (not isinstance(outcome, HistoryOperationResult) or outcome.operation != "restore"
+                or outcome.request_id != self._restore_request):
+            return
+        self._restore_request = 0
+        if self._history_view is not None:
+            self._history_view.set_restore_busy(False)
+        if outcome.error_code is not None:
+            if self._history_view is not None:
+                self._history_view.set_message(outcome.message or "기록 불러오기 요청이 만료되었습니다.")
+            return
+        if isinstance(outcome.value, PreparedHistoryRestore):
+            self._replace_from_history(outcome.value)
+
+    def _replace_from_history(self, prepared: PreparedHistoryRestore) -> None:
+        if prepared.mode not in {"single", "batch"}:
+            return
+        try:
+            if self._context_identity is not None and self._context_identity() != self._initial_identity:
+                return
+        except (OSError, RuntimeError):
+            return
+        candidate = None
+        binding = None
+        try:
+            binding = self._new_history_binding(prepared.mode)
+            options = dict(context_identity=self._context_identity, asset_root=self._asset_root, history_binding=binding)
+            candidate = (CultivationCalculatorContent(self._service, self.mode_stack, **options) if prepared.mode == "single"
+                         else CultivationBatchContent(self._service, parent=self.mode_stack, **options))
+            candidate.restore_from_history(prepared)
+            if self._context_identity is not None and self._context_identity() != self._initial_identity:
+                candidate.close_controller()
+                candidate.deleteLater()
+                return
+        except Exception:
+            if candidate is not None:
+                candidate.close_controller()
+                candidate.deleteLater()
+            elif binding is not None:
+                binding.close()
+            if self._history_view is not None:
+                self._history_view.set_message("기록 설정을 불러오지 않았습니다; 기존 초안은 그대로 유지됩니다. 자료 호환성을 확인한 후 다시 시도하세요.")
+            return
+        # Only a completely built candidate replaces the visible draft.
+        self._cancel_batch_result_transition()
+        self._single_scroll_generation += 1
+        mode = prepared.mode
+        old = self.calculator if mode == "single" else self.batch_calculator
+        index = self.mode_stack.indexOf(old)
+        self.mode_stack.removeWidget(old)
+        self.mode_stack.insertWidget(index, candidate)
+        if mode == "single":
+            self.calculator = candidate
+            self._single_available = False
+            candidate.calculation_completed.connect(self._queue_single_material_scroll)
+        else:
+            self.batch_calculator = candidate
+            self._batch_available = False
+            candidate.result_view_requested.connect(self._show_batch_result)
+            candidate.result_replaced.connect(self._begin_batch_result_transition)
+        candidate.plan_available.connect(lambda available: self._set_plan_available(mode, available))
+        candidate.layout_changed.connect(self._queue_scroll_extent)
+        candidate.owned_materials.set_import_available(self._material_importer is not None)
+        candidate.owned_materials.import_requested.connect(self._import_owned_materials)
+        self.material_scope.setCurrentIndex(self.material_scope.findData(candidate.export_history_configuration()["material_scope"]))
+        self._set_material_scope()
+        self._set_mode(mode)
+        old.close_controller()
+        old.hide()
+        old.deleteLater()
+        self._leave_history()
 
     def _import_owned_materials(self) -> None:
         importer = self._material_importer
@@ -130,7 +269,7 @@ class CultivationCalculatorPage(QWidget):
         except ValueError as exc:
             message = f"재료 가져오기가 완료되지 않았습니다: {exc}"
         except Exception:
-            message = "재료 가져오기가 완료되지 않았습니다: 네이티브 아카이브 읽기에 실패했습니다. 동기화 상태를 확인한 후 다시 시도하세요."
+            message = "재료 가져오기가 완료되지 않았습니다: 동기화 데이터 읽기에 실패했습니다. 동기화 상태를 확인한 후 다시 시도하세요."
         else:
             if (self._context_identity is not None
                     and self._context_identity() != self._initial_identity):
@@ -138,9 +277,12 @@ class CultivationCalculatorPage(QWidget):
             observed = dict(imported.quantities)
             applied = 0
             for content in (self.calculator, self.batch_calculator):
-                applied += content.owned_materials.apply_import(observed)
+                applied += content.owned_materials.apply_import(
+                    observed, source=imported.source, saved_at_utc=imported.saved_at_utc,
+                )
+            origin = ("계정에 저장된 패킷 캡처 재료 관측 시각:" if imported.source == "packet" else "네이티브 아카이브 저장 시각:")
             message = (
-                f"네이티브 보관 기록은 {imported.saved_at_utc}에 저장됨; 재료 {len(observed)}종 인식,"
+                f"{origin} {imported.saved_at_utc}; 재료 {len(observed)}종 인식, "
                 f"이번 초안에서 {applied}곳을 업데이트했습니다. 관측되지 않은 항목과 수동 수정은 원래 값을 유지합니다."
             )
             if imported.skipped_item_count:
@@ -195,6 +337,12 @@ class CultivationCalculatorPage(QWidget):
         reset.setObjectName("cultivationCalculatorReset")
         reset.clicked.connect(self._reset)
         row.addWidget(reset)
+
+        history = QPushButton("기록", header)
+        history.setObjectName("cultivationHistoryOpen")
+        history.setEnabled(self._history_service is not None)
+        history.clicked.connect(self._show_history)
+        row.addWidget(history)
 
         self.copy_button = QPushButton("목록 복사", header)
         self.copy_button.setObjectName("cultivationCalculatorCopy")
@@ -404,7 +552,10 @@ class CultivationCalculatorPage(QWidget):
     def shutdown(self) -> None:
         self._cancel_batch_result_transition()
         self._batch_retired_pending.clear()
+        self.calculator.close_controller()
         self.batch_calculator.close_controller()
+        if self._history_controller is not None:
+            self._history_controller.close()
 
 
 def _mode_style(active: bool) -> str:

@@ -21,12 +21,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
     QKeySequenceEdit,
 )
 
 from src.features.settings.work_mode_card import build_work_mode_card
+from src.features.settings.performance_card import PerformanceCard
 from src.app.constants import NETDISK_DOWNLOAD_LINKS
 from src.app.context import AppContext
 from src.app.theme import THEME_LABELS, themed_style
@@ -138,7 +140,10 @@ def _build_capture_diagnostics_card(window):
 
     def save_capture_diagnostics() -> None:
         if callable(save_handler):
-            save_handler()
+            settings = save_handler()
+            window.performance_controller.capture_changed(settings)
+            if settings is None and callable(settings_reader):
+                window._sync_raw_capture_toggle.setChecked(bool(settings_reader()["raw_capture_enabled"]))
 
     window._sync_capture_device_edit.editingFinished.connect(save_capture_diagnostics)
 
@@ -167,6 +172,14 @@ def _build_capture_diagnostics_card(window):
 
     window._sync_raw_capture_toggle.clicked.connect(save_raw_capture_diagnostics)
     form.addRow("수집 문제 해결:", raw_capture_row)
+    performance_link = QCheckBox("성능도 함께 기록")
+    performance_link.setToolTip("문제 해결이 켜져 있으면 서비스 소요 시간을 계정 로그 디렉터리에 저장합니다. 동기화, 전투 리포트, HUD를 따로 시작하지는 않습니다.")
+    performance_link.clicked.connect(window.performance_controller.set_linked)
+    def refresh_performance_link():
+        performance_link.setChecked(window.performance_controller.snapshot()["linked"])
+    window.performance_controller.changed.connect(refresh_performance_link)
+    refresh_performance_link()
+    form.addRow("성능 로그:", performance_link)
     card.layout().addLayout(form)
     return card
 
@@ -174,7 +187,7 @@ def _build_capture_diagnostics_card(window):
 def _build_environment_card(window):
     card = window._card("환경 설정")
     window._environment_configuration_card = card
-    npcap_title = QLabel("Npcap · 데이터 동기화, 전투 리포트 수집")
+    npcap_title = QLabel("Npcap · 가방 동기화, 기본 전투 리포트")
     npcap_title.setStyleSheet(themed_style("font-weight:700;font-size:14px"))
     card.layout().addWidget(npcap_title)
     npcap_row = QHBoxLayout()
@@ -226,7 +239,13 @@ def _build_environment_card(window):
     window._equipment_plugin_loading_method_combo.currentIndexChanged.connect(
         window._equipment_plugin_loading_method_changed
     )
-    form.addRow("로드 방식:", window._equipment_plugin_loading_method_combo)
+    loading_row = QHBoxLayout()
+    loading_row.addWidget(window._equipment_plugin_loading_method_combo)
+    loading_hint = QLabel("사용할 수 없으면 예비 로드 방식을 선택하세요")
+    loading_hint.setWordWrap(True)
+    loading_hint.setStyleSheet(themed_style("color:#8b949e;font-size:12px"))
+    loading_row.addWidget(loading_hint, 1)
+    form.addRow("로드 방식:", loading_row)
     window._equipment_plugin_game_executable_edit = QLineEdit()
     window._equipment_plugin_game_executable_edit.setPlaceholderText(
         "HTGame.exe의 전체 파일 경로를 직접 붙여넣을 수 있습니다"
@@ -252,7 +271,10 @@ def _build_environment_card(window):
     card.layout().addLayout(form)
 
     window._equipment_plugin_status_label = QLabel()
-    window._equipment_plugin_status_label.setWordWrap(False)
+    window._equipment_plugin_status_label.setMinimumWidth(0)
+    window._equipment_plugin_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    window._equipment_plugin_status_label.setTextFormat(Qt.PlainText)
+    window._equipment_plugin_status_label.setWordWrap(True)
     window._equipment_plugin_status_label.setStyleSheet(
         themed_style("color:#8b949e;font-size:12px")
     )
@@ -326,7 +348,7 @@ def build_settings_page(
     protagonist_row = QHBoxLayout()
     protagonist_row.addWidget(QLabel("주인공 게임 이름:"))
     window._protagonist_game_name_edit = QLineEdit()
-    window._protagonist_game_name_edit.setPlaceholderText("「제로」가 게임 안에서 표시되는 플레이어 이름")
+    window._protagonist_game_name_edit.setPlaceholderText("자동 장착 전용")
     protagonist_name_width = (
         window._protagonist_game_name_edit.fontMetrics().horizontalAdvance("零" * 8) + 36
     )
@@ -515,6 +537,9 @@ def build_settings_page(
     layout.addWidget(about_card)
 
     layout.addWidget(plugin_card)
+    performance_card = window._card("성능 모니터링")
+    performance_card.layout().addWidget(PerformanceCard(window.performance_controller))
+    layout.addWidget(performance_card)
     layout.addWidget(sync_card)
 
     paths = _settings_paths(app_context)

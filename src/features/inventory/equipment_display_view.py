@@ -146,8 +146,8 @@ def build_equipment_mode_switch(self: Any, parent: QWidget | None = None) -> QWi
     layout = QHBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(6)
-    self.equip_saved_mode_btn = QPushButton("장비 세팅 계산")
-    self.equip_game_mode_btn = QPushButton("게임 장비 세팅")
+    self.equip_saved_mode_btn = QPushButton("계산 세팅")
+    self.equip_game_mode_btn = QPushButton("게임 세팅")
     for button in (self.equip_saved_mode_btn, self.equip_game_mode_btn):
         button.setCheckable(True)
         button.setFixedWidth(104)

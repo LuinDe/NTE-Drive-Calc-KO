@@ -106,7 +106,10 @@ class NteAnalysisCoreClient:
         )
         self.supports_allocation = (
             engine_version == ENGINE_VERSION
-            and capabilities is not None and "allocation_v1" in capabilities
+            and capabilities is not None and "allocation_v2" in capabilities
+        )
+        self.supports_native_payload_fragments = (
+            capabilities is not None and "battle_native_payload_fragments_v1" in capabilities
         )
         self.timeout = timeout
         self.cancelled = cancelled
@@ -232,6 +235,7 @@ class NteAnalysisCoreClient:
         try:
             stdout, returncode = communicate_progress(
                 process, payload, timeout=self.timeout, max_output_bytes=MAX_BYTES,
+                total_timeout=max(self.timeout, 600.0),
                 checkpoint=lambda: self._checkpoint(checkpoint),
                 progress_callback=progress_callback,
             )
@@ -274,7 +278,7 @@ class NteAnalysisCoreClient:
             raise NativeAnalysisError("콘솔 분배 입력이 크기 제한을 초과했습니다")
         response = _json_object(self._run(encoded, checkpoint=checkpoint))
         if (response.get("batch_kind") != "allocation_v1"
-                or type(response.get("version")) is not int or response["version"] != 1
+                or type(response.get("version")) is not int or response["version"] != 2
                 or not isinstance(response.get("plans"), dict)):
             raise NativeAnalysisError("콘솔 분배 응답 프로토콜이 일치하지 않습니다")
         self._checkpoint(checkpoint)
@@ -314,6 +318,9 @@ class NteAnalysisCoreClient:
         if not self.supports_battle_page:
             raise NativeAnalysisError("분석 구성 요소가 아직 데이터베이스 직접 읽기를 지원하지 않습니다. 해당 버전을 배포하세요")
         started = time.perf_counter()
+        request = dict(request)
+        if self.supports_native_payload_fragments:
+            request["native_payload_encoding"] = "fragments_v1"
         payload = json.dumps({
             "schema_version": REQUEST_SCHEMA, "batch_kind": "battle_page_v1",
             "dataset_version": self.dataset_version, "request": dict(request),

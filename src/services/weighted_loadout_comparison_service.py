@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 from src.domain.allocation_rating import allocation_grade
+from src.optimizer.scoring import ScoringEngine
+from src.services.allocation_comparison_scoring import FrozenComparisonScorer, persist_comparison_diff
+from src.services.sqlite_allocation_inventory import legacy_stat_name
 from src.optimizer.contracts import (
     DIFF_ADDED,
     DIFF_ADDED_UIDS,
@@ -41,6 +44,7 @@ class WeightedLoadoutComparison:
     slot_key: str
     old_items: tuple[dict[str, Any], ...]
     diff: Mapping[str, Any]
+    scorer: FrozenComparisonScorer | None = field(default=None, repr=False, compare=False)
 
 
 def _uid(kind: str, slot: int, serial: int) -> str:
@@ -89,7 +93,7 @@ def _old_item_snapshot(
     item: Mapping[str, Any],
     assignment: Mapping[str, Any],
     *,
-    score: float,
+    score: float | None,
     labels: Mapping[str, str],
     suit_names: Mapping[str, str],
     shape_names: Mapping[str, str],
@@ -107,12 +111,16 @@ def _old_item_snapshot(
         EQUIP_UID: uid,
         EQUIP_TYPE: "tape" if kind == "core" else "drive",
         EQUIP_QUALITY: quality,
-        EQUIP_SCORE: round(float(score), 2),
         EQUIP_SCORE_AREA: area,
         EQUIP_AREA: area,
-        EQUIP_GRADE: allocation_grade(float(score), area) if area else "D",
         EQUIP_SUB_STATS: _stat_map(item.get("sub_stats"), labels),
+        "virtual": bool(item.get("virtual")),
     }
+    if score is not None:
+        common[EQUIP_SCORE] = float(score)
+        common[EQUIP_GRADE] = allocation_grade(float(score), area) if area else "D"
+    else:
+        common["comparison_score_unavailable"] = "점수 데이터 부족"
     if kind == "core":
         main_stats = _stat_map(item.get("main_stats"), labels)
         main_name = next(iter(main_stats), "未知主词条")
@@ -148,18 +156,21 @@ def _new_item_snapshots(context: Any, option: Any, labels: Mapping[str, str], su
             EQUIP_UID: _uid(kind, assignment.uid[0], assignment.uid[1]),
             EQUIP_TYPE: "tape" if kind == "core" else "drive",
             EQUIP_QUALITY: quality,
-            EQUIP_SCORE: round(float(assignment.score), 2),
+            EQUIP_SCORE: float(assignment.score),
             EQUIP_SCORE_AREA: area,
             EQUIP_AREA: area,
             EQUIP_GRADE: allocation_grade(float(assignment.score), area) if area else "D",
             EQUIP_SUB_STATS: sub_stats,
+            "virtual": bool(getattr(assignment, "virtual", False)),
         }
         if kind == "core":
             main = next(iter(getattr(candidate, "main_stats", ()) or ()), None)
             main_name = labels.get(str(getattr(main, "property_id", "") or ""), str(getattr(main, "property_id", "") or "未知主词条"))
             set_id = str(getattr(candidate, "suit_id", None) or assignment.suit_id or "")
             set_name = suit_names.get(set_id, set_id or "빈 콘솔")
-            rows.append({**common, EQUIP_SET_NAME: set_name, EQUIP_MAIN_STATS: main_name, EQUIP_DISPLAY_NAME: f"{set_name}-{main_name}"})
+            main_value = float(main.value) * (100 if main.percent else 1) if main is not None else None
+            rows.append({**common, EQUIP_SET_NAME: set_name, EQUIP_MAIN_STATS: main_name,
+                         "main_value": main_value, EQUIP_DISPLAY_NAME: f"{set_name}-{main_name}"})
         else:
             shape_name = _shape_name(assignment.geometry, shape_names)
             rows.append({**common, EQUIP_SHAPE_ID: shape_name, EQUIP_DISPLAY_NAME: shape_name})
@@ -172,70 +183,126 @@ def _diff(old_items: Sequence[Mapping[str, Any]], new_items: Sequence[Mapping[st
     added = set(new) - set(old)
     removed = set(old) - set(new)
     return {
-        DIFF_CHANGED: bool(added or removed),
-        DIFF_ADDED_UIDS: added,
-        DIFF_ADDED: tuple(new[uid] for uid in new if uid in added),
+        DIFF_CHANGED: bool(old and (added or removed)),
+        DIFF_ADDED_UIDS: added if old else set(),
+        DIFF_ADDED: tuple(new[uid] for uid in new if uid in added) if old else (),
         DIFF_REMOVED: tuple(old[uid] for uid in old if uid in removed),
     }
 
 
-def freeze_weighted_loadout_comparisons(user_dao: Any, static_dao: Any, context: Any, options: Sequence[Any]) -> dict[int, tuple[WeightedLoadoutComparison, ...]]:
-    """Freeze every visible saved-slot baseline with the calculation result."""
-
-    attributes = {str(row["attribute_id"]): str(row.get("display_name_zh") or row["attribute_id"]) for row in static_dao.list_equipment_attributes()}
+def freeze_role_loadout_comparisons(user_dao, static_dao, character_id, scorer, *, checkpoint=lambda: None):
+    """Freeze a role's slot identities and rescore only their old equipment."""
+    attributes = dict(scorer.names)
     suits = {str(row["suit_id"]): str(row.get("name_zh") or row["suit_id"]) for row in static_dao.list_suits()}
     shapes = {
         str(row["shape_id"]): str(row.get("legacy_shape_id") or row.get("legacy_label") or row["shape_id"]).removeprefix("EquipmentGeometry_")
         for row in static_dao.list_shapes()
     }
-    result: dict[int, tuple[WeightedLoadoutComparison, ...]] = {}
-    for option in options:
-        comparisons = []
-        for slot in user_dao.list_loadout_slots(int(option.character_id)):
-            plan = slot.get("current_plan")
-            if not isinstance(plan, Mapping):
-                continue
-            assignments = tuple(plan.get("assignments") or ())
-            real_uids = {
-                (int(row["uid_serial"]), int(row["uid_slot"]))
-                for row in assignments
-                if not is_virtual_equipment_assignment(normalized_equipment_assignment(row))
-            }
-            inventory = {
+    comparisons = []
+    inventory_cache, score_cache = {}, {}
+    scoring_metadata = scorer.metadata()
+    for slot in user_dao.list_loadout_slots(int(character_id)):
+        checkpoint()
+        plan = slot.get("current_plan") or {}
+        assignments = tuple(plan.get("assignments") or ())
+        real_uids = {
+            (int(row["uid_serial"]), int(row["uid_slot"]))
+            for row in assignments
+            if not is_virtual_equipment_assignment(normalized_equipment_assignment(row))
+        }
+        source_id = plan.get("source_snapshot_id")
+        cache_key = (source_id, frozenset(real_uids))
+        if cache_key not in inventory_cache:
+            inventory_cache[cache_key] = {
                 (int(row["uid_serial"]), int(row["uid_slot"])): row
-                for row in user_dao.list_inventory_items(int(plan["source_snapshot_id"]), uids=real_uids)
+                for row in (user_dao.list_inventory_items(int(source_id), uids=real_uids)
+                            if source_id is not None else ())
             }
-            saved_scores = (plan.get("payload") or {}).get("assignment_scores") or {}
-            old_items = []
-            for assignment in assignments:
-                normalized = normalized_equipment_assignment(assignment)
-                item = virtual_equipment_inventory_item(normalized) if is_virtual_equipment_assignment(normalized) else inventory.get((int(assignment["uid_serial"]), int(assignment["uid_slot"])))
-                if item is None:
-                    continue
-                uid = _uid(str(assignment.get("kind") or ""), assignment["uid_slot"], assignment["uid_serial"])
-                old_items.append(_old_item_snapshot(item, assignment, score=float(saved_scores.get(uid, 0.0)), labels=attributes, suit_names=suits, shape_names=shapes))
-            new_items = _new_item_snapshots(context, option, attributes, suits, shapes)
-            comparisons.append(WeightedLoadoutComparison(
-                slot_id=int(slot["slot_id"]),
-                slot_name=str(slot.get("slot_name") or slot["slot_id"]),
-                slot_key=str(slot.get("slot_key") or ""),
-                old_items=tuple(old_items),
-                diff=_diff(old_items, new_items),
-            ))
-        result[int(option.character_id)] = tuple(comparisons)
-    return result
+        inventory = inventory_cache[cache_key]
+        main_values = (plan.get("payload") or {}).get("tape_main_values") or {}
+        old_items = []
+        for assignment in assignments:
+            normalized = normalized_equipment_assignment(assignment)
+            item = virtual_equipment_inventory_item(normalized) if is_virtual_equipment_assignment(normalized) else inventory.get((int(assignment["uid_serial"]), int(assignment["uid_slot"])))
+            checkpoint()
+            uid = _uid(str(assignment.get("kind") or ""), assignment["uid_slot"], assignment["uid_serial"])
+            score = None
+            score_key = (source_id, uid, main_values.get(uid))
+            if item is not None:
+                try:
+                    if score_key not in score_cache:
+                        score_cache[score_key] = scorer.score_inventory_item(item, main_value=main_values.get(uid))
+                    score = score_cache[score_key]
+                except (ValueError, TypeError, KeyError):
+                    pass
+            snapshot = _old_item_snapshot(item or normalized, assignment, score=score,
+                                          labels=attributes, suit_names=suits, shape_names=shapes)
+            if snapshot.get(EQUIP_TYPE) == "tape":
+                value = main_values.get(uid)
+                if value is None:
+                    base = scorer.engine.stat_catalog.tape_main_values.get(snapshot.get(EQUIP_MAIN_STATS))
+                    value = float(base) * scorer.engine.quality_map.get(snapshot.get(EQUIP_QUALITY), 1) if base is not None else None
+                snapshot["main_value"] = value
+            old_items.append(snapshot)
+        comparisons.append(WeightedLoadoutComparison(
+            slot_id=int(slot["slot_id"]),
+            slot_name=str(slot.get("slot_name") or slot["slot_id"]),
+            slot_key=str(slot.get("slot_key") or ""),
+            old_items=tuple(old_items),
+            scorer=scorer,
+            diff=dict(_diff(old_items, ()), comparison_version=1, score_basis="calculation_weights",
+                      scoring=scoring_metadata, baseline_plan_id=plan.get("plan_id"),
+                      baseline_snapshot_id=source_id, baseline_slot_id=int(slot["slot_id"])),
+        ))
+    return tuple(comparisons)
+
+
+def freeze_weighted_loadout_comparisons(user_dao: Any, static_dao: Any, context: Any, options: Sequence[Any]) -> dict[int, tuple[WeightedLoadoutComparison, ...]]:
+    """Freeze the solver's base-weight policy, including blacklist normalization."""
+    engine = ScoringEngine(roles_db={})
+    attributes = static_dao.list_equipment_attributes()
+    names = {row.property_id: legacy_stat_name(row.property_id) or row.scoring_name
+             for row in context.attributes}
+    rows = {}
+    for role in context.roles:
+        zeros = (tuple(names.get(pid, pid) for pid in role.substat_blacklist)
+                 if role.blacklist_zero_weight and context.allocation_strategy == "role_priority" else ())
+        scorer = FrozenComparisonScorer.from_engine(
+            engine, character_id=role.character_id,
+            weights={names.get(pid, pid): weight for pid, weight in role.effective_property_weights},
+            main_weights={names.get(pid, pid): weight for pid, weight in role.effective_main_property_weights},
+            attributes=attributes, dataset_id=context.static_dataset.dataset_id, zero_weight_stats=zeros,
+        )
+        rows[int(role.character_id)] = freeze_role_loadout_comparisons(user_dao, static_dao, role.character_id, scorer)
+        for row in rows[int(role.character_id)]:
+            row.diff["calculation_snapshot_id"] = context.snapshot.snapshot_id
+    return refresh_weighted_loadout_comparisons(rows, context, options) if options else rows
+
+
+def select_frozen_comparison(rows, slot_id):
+    if slot_id is None:
+        return persist_comparison_diff(dict(comparison_version=1, score_basis="calculation_weights",
+                                            baseline_slot_id=None, baseline_plan_id=None, baseline_snapshot_id=None))
+    row = next((row for row in rows if row.slot_id == int(slot_id)), None)
+    if row is None:
+        raise RuntimeError("대상 장비 세팅 슬롯이 변경되었습니다. 다시 계산하세요.")
+    return persist_comparison_diff(row.diff)
 
 
 def refresh_weighted_loadout_comparisons(comparisons: Mapping[int, Sequence[WeightedLoadoutComparison]], context: Any, options: Sequence[Any]) -> dict[int, tuple[WeightedLoadoutComparison, ...]]:
     """Rebuild diffs after an in-preview manual replacement."""
 
     option_map = {int(option.character_id): option for option in options}
-    labels = {str(row.property_id): str(row.scoring_name) for row in getattr(context, "attributes", ())}
+    labels = {str(row.property_id): legacy_stat_name(row.property_id) or str(row.scoring_name)
+              for row in getattr(context, "attributes", ())}
     result = {}
     for character_id, rows in comparisons.items():
         option = option_map.get(int(character_id))
         if option is None:
             continue
         new_items = _new_item_snapshots(context, option, labels, {}, {})
-        result[int(character_id)] = tuple(replace(row, diff=_diff(row.old_items, new_items)) for row in rows)
+        result[int(character_id)] = tuple(replace(row, diff={**row.diff, **_diff(
+            row.old_items,
+            tuple(row.scorer.verify_result_score(dict(item)) for item in new_items) if row.scorer else new_items,
+        )}) for row in rows)
     return result

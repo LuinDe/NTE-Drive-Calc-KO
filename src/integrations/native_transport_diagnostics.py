@@ -7,6 +7,11 @@ from src.integrations.native_snapshot_timing import SnapshotTimingLog
 from src.integrations.native_hud_interaction import HudInteractionLog
 
 
+def archive_failed(_event=None):
+    from src.utils.logger import logger
+    logger.warning("DLL 원본 스냅샷을 저장하지 못해 이번 진단 보관을 중지했습니다; 계정 로그 디렉터리의 쓰기 가능 여부와 디스크 공간을 확인하세요.")
+
+
 def invalid_json(line, error, *, executable_sha256, exit_code, core_pid=None):
     log_event("ERROR", "native_core.invalid_json", "수집 Core 응답을 해석할 수 없어 이번 연결을 중지했습니다",
               OperationContext.create("native_core"), line_chars=len(line),

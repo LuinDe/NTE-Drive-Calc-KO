@@ -23,6 +23,7 @@ from src.optimizer.contracts import (
     plan_drives,
 )
 from src.services.game_ui_asset_catalog import GameUiAssetCatalog
+from src.services.allocation_failure_text import allocation_failure_text
 from src.services.warehouse_visual_catalog import representative_module_item_id
 from src.ui.puzzle_board import PuzzleBoardWidget
 from src.features.allocation.results_diff_view import _diff_value
@@ -92,7 +93,7 @@ def _render_results(self, plan):
         it = self.result_content_layout.takeAt(0)
         if it.widget():
             it.widget().deleteLater()
-    mode_labels = {"role_priority": "캐릭터 우선", "update_mode": "증분 갱신"}
+    mode_labels = {"role_priority": "캐릭터 우선", "update_mode": "잠금 갱신"}
     mode_name = mode_labels.get(getattr(self, "_pending_strat", ""), "")
     plan_diffs = getattr(self, "allocation_plan_diff", {}) or {}
     if locked_roles:
@@ -113,8 +114,8 @@ def _render_results(self, plan):
         return
     for role, p in plan.items():
         if not p or not p.get(PLAN_VALID):
-            reason = str((p or {}).get("reason") or "청사진에 필요한 카트리지나 드라이브를 맞출 수 없습니다")
-            failure = QLabel(f"❌ {role}: 유효한 장비 세팅 방안 없음\n원인: {reason}")
+            reason = allocation_failure_text(p)
+            failure = QLabel(f"❌ {role}：{reason}")
             failure.setWordWrap(True)
             failure.setStyleSheet(themed_style("color:#f85149;padding:8px 2px"))
             self.result_content_layout.addWidget(failure)

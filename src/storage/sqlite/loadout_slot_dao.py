@@ -69,6 +69,17 @@ class LoadoutSlotDaoMixin(UserDataDaoMixinHost):
             """
         )
 
+    def list_visible_loadout_slots_with_plans(self) -> list[dict[str, Any]]:
+        """Batch current plans while retaining empty visible slots."""
+        slots = self.list_visible_loadout_slots()
+        plans = {int(plan["plan_id"]): plan for plan in self.get_loadout_plans(
+            [int(slot["current_plan_id"]) for slot in slots if slot["current_plan_id"] is not None]
+        )}
+        for slot in slots:
+            slot["is_archived"] = bool(slot["is_archived"])
+            slot["current_plan"] = plans.get(slot["current_plan_id"])
+        return slots
+
     def list_current_loadout_equipment_owners(self) -> list[dict[str, Any]]:
         """Return physical equipment referenced by every visible current slot."""
 
@@ -278,6 +289,7 @@ class LoadoutSlotDaoMixin(UserDataDaoMixinHost):
         status: str = "ready",
         score: float | None = None,
         payload: Mapping[str, Any] | None = None,
+        comparison_baseline: Mapping[str, Any] | None = None,
     ) -> int:
         slot = self.get_loadout_slot(slot_id)
         if slot is None or slot["is_archived"]:
@@ -295,6 +307,7 @@ class LoadoutSlotDaoMixin(UserDataDaoMixinHost):
             payload=payload,
             is_active=False,
             slot_id=int(slot["slot_id"]),
+            comparison_baseline=comparison_baseline,
         )
 
     def save_replacement_plan_to_slot(
@@ -549,6 +562,7 @@ class LoadoutSlotDaoMixin(UserDataDaoMixinHost):
                     status=str(row.get("status") or "ready"),
                     score=row.get("score"),
                     payload=row.get("payload") if isinstance(row.get("payload"), Mapping) else None,
+                    comparison_baseline=row.get("comparison_baseline"),
                 )
                 for slot_id, row in zip(slot_ids, plans)
             )

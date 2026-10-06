@@ -8,7 +8,11 @@ def freeze(request, scorer):
     """No scoring/search in Python: only names, immutable source data and indices."""
     from src.domain.suit_identity import normalized_suit_name, suit_id_for_target
 
-    roles = list(request.roles_db)
+    # The catalogue contains every character; only the selected run has frozen
+    # crit evidence and must be sent to the native solver.
+    roles = list(dict.fromkeys(request.role_order))
+    if any(role not in request.roles_db for role in roles):
+        raise ValueError('allocation_v1 selected role is absent from the role catalogue')
     indexes = {name: index for index, name in enumerate(roles)}
     catalog = scorer.stat_catalog
     stats = asdict(catalog)
@@ -21,7 +25,8 @@ def freeze(request, scorer):
         names.update(item.get('sub_stats', {}))
         main = item.get('main_stats')
         names.update(main if isinstance(main, dict) else [str(main or '')])
-    for role in request.roles_db.values():
+    for role_name in roles:
+        role = request.roles_db[role_name]
         for field in ('weights', 'main_weights', 'extra_shape_buffs'):
             names.update(role.get(field, {}) or {})
     for pref in request.stat_priority_configs.values():
@@ -78,7 +83,7 @@ def freeze(request, scorer):
     if request.strategy != 'role_priority':
         raise ValueError('allocation_v1 requires role_priority')
     return {'batch_kind': 'allocation_v1', 'request': {
-        'version': 1, 'inventory': inventory, 'roles': role_inputs,
+        'version': 2, 'inventory': inventory, 'roles': role_inputs,
         'role_order': [indexes[role] for role in request.role_order],
         'groups': [[indexes[role] for role in group if role in indexes] for group in request.priority_groups],
         'stats': stats, 'names': mapping,
