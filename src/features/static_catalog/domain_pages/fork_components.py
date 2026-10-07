@@ -38,7 +38,7 @@ _EVENT_LABELS = {
     "BUFF_EVENT_CRIT": "치명타 발생",
     "BUFF_EVENT_E_SKILL_BEGIN": "전투 스킬 사용",
     "BUFF_EVENT_FINISH": "효과 종료",
-    "BUFF_EVENT_INCREASE_UNBAL": "브레이크 축적 발생",
+    "BUFF_EVENT_INCREASE_UNBAL": "붕괴 축적 발생",
     "BUFF_EVENT_KILL": "대상 처치",
     "BUFF_EVENT_KILL_ALL_PLAYER": "팀이 대상 처치",
     "BUFF_EVENT_PERFECT_EVADE": "완벽 회피",

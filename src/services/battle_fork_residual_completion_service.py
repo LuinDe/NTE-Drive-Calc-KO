@@ -120,7 +120,7 @@ def _rules_dustbin(selected: Any, factory: type[Any]) -> tuple[Any, ...]:
         factory,
         suffix="dustbin-topple-reduction-trigger",
         name=(
-            f"危险游戏: 브레이크 수치 감소 후 브레이크 강도 ({values[1]:g}초 지속,"
+            f"危险游戏: 붕괴 수치 감소 후 붕괴 강도 ({values[1]:g}초 지속,"
             f"재사용 대기시간 {values[2]:g}초; 강인도 감소 이벤트 없음)"
         ),
         modifiers=(_modifier("UnbalIntensityAdd", values[0]),),

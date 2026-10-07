@@ -269,7 +269,7 @@ class StaticCatalogFormulaQueries:
         ).fetchall()
         levels = tuple(int(float(row["character_level"])) for row in rows)
         if levels != tuple(range(1, 81)):
-            raise StaticGameDataError("브레이크 레벨 곡선에 완전한 캐릭터 레벨 1–80이 없습니다")
+            raise StaticGameDataError("붕괴 레벨 곡선에 완전한 캐릭터 레벨 1–80이 없습니다")
         return tuple(float(row["value"]) for row in rows)
 
 

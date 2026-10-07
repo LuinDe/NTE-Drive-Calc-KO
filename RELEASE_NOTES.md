@@ -1,3 +1,8 @@
+> [!NOTE]
+> **10-07 갱신: 倾陷 용어를 '붕괴'로 통일 — 이미 설치했다면 새 설치 파일을 그대로 실행하면 갱신됩니다.**
+> 첫 배포판(패치 실행 파일 `5b3e9cdd…`)에서 '브레이크'로 나오던 용어를 '붕괴'로 바꿨습니다. 그 밖의 내용은 같습니다.
+> 갱신해도 원본 백업(`NTE_Drive_Calc.original.exe`)은 그대로 남아 언제든 원본으로 복원할 수 있습니다.
+
 NTE Drive Calc **2.3.1** 한국어 패치입니다. 원작자의 허락을 받고 배포합니다.
 
 ## 설치
@@ -9,6 +14,11 @@ NTE Drive Calc **2.3.1** 한국어 패치입니다. 원작자의 허락을 받�
 
 원본 실행 파일은 `NTE_Drive_Calc.original.exe`로, 원본 튜토리얼 이미지는 `guide_zh` 폴더로 자동 백업됩니다.
 **되돌리려면** 설치 파일을 다시 실행하고 `[아니오] 원본으로 복원`을 고르세요.
+
+### 2.3.1 한글 패치 첫 배포판(10-07 갱신 전)을 쓰던 분
+
+새 설치 파일을 그대로 실행하면 **묻지 않고 바로 갱신**됩니다. 원본 백업은 건드리지 않으므로 갱신 뒤에도
+`[아니오] 원본으로 복원`이 그대로 동작합니다.
 
 ### 2.3.0 한글 패치를 쓰던 분
 
@@ -55,6 +65,8 @@ NTE Drive Calc **2.3.1** 한국어 패치입니다. 원작자의 허락을 받�
 
 ## 이번 한글 패치
 
+- **10-07 갱신**: 倾陷 용어를 '브레이크' 대신 **'붕괴'**로 표기 — 전투 리포트·몬스터 도감·메커니즘 설명 등
+  245개 문자열(붕괴 피해, 붕괴 상한, 붕괴 회복 등). 검색창에서도 '붕괴'로 찾을 수 있습니다
 - 2.3.1 신규 화면 문자열 **696개** 번역 (기존 번역 약 10,000개 재사용)
 - 전투 리포트 분석 컴포넌트 갱신 대응: 표시 사전 1,336 → **1,482 항목** (장비 분배 실패 진단, 레이븐 노바 구간 등 새 문장 직접 번역).
   2.3.1에서 새로 생긴 분석 문장 83개는 모두 한국어로 표시되며, 2.3.0 때부터 남아 있던 문장 일부도 추가로 번역했습니다
@@ -117,11 +129,12 @@ NTE Drive Calc **2.3.1** 한국어 패치입니다. 원작자의 허락을 받�
 ## SHA256
 
 ```
-ab0179e49e1b6f088548001000f749aff93bf9b768c518824ad746f0ecea1174  NTE_Drive_Calc_2.3.1_KO_Patch_Setup.exe
-9605a73593d4d1100278baebe8cfc961228de50c15c543835587c8bdc6e79e3d  NTE_Drive_Calc_2.3.1_KO_source.zip
-5b3e9cdd33e55560680224f23b62c9d202df74f89b5d6bb73ee777f5976b33f5  패치된 NTE_Drive_Calc.exe
+0a9c63f5468af725f9a44b0ef2367a4963ed52dc91ab7eaa2b1bad1ee0ea2580  NTE_Drive_Calc_2.3.1_KO_Patch_Setup.exe
+a154e2b86bf477eb3cefe48437e490052a3768e9371d987d6100efc07dd8e99a  NTE_Drive_Calc_2.3.1_KO_source.zip
+b2757a3e37995e445e87fcd64365d91bf9ca58388f6364fe03cc0a61a43d9d8a  패치된 NTE_Drive_Calc.exe
 5b8fa8d2b7580bacd494c0f71e76d7b05cf1bee4f9b94bb945993a2e1c69e8c3  공식 2.3.1 원본 NTE_Drive_Calc.exe
 57a6f351d53a32c6f989335e1ea812cd55057e331902b5921343ad2d73428841  공식 설치 파일 NTE_Drive_Calc_Setup_2.3.1.exe
+5b3e9cdd33e55560680224f23b62c9d202df74f89b5d6bb73ee777f5976b33f5  10-07 갱신 전 첫 배포판의 패치된 NTE_Drive_Calc.exe (이 설치 파일로 덮어써 갱신됨)
 ```
 
 설치 후 직접 확인하실 수 있습니다.
@@ -135,5 +148,6 @@ certutil -hashfile "C:\Program Files\NTE Drive Calc\NTE_Drive_Calc.exe" SHA256
 NTE Drive Calc는 **AGPL-3.0**으로 배포되는 프로그램이며 이 패치는 그 파생물입니다. 이 릴리스의
 실행 파일에 대응하는 소스는 같은 태그의 [`src/`](../../tree/v2.3.1-ko/src)와 함께 올린 `NTE_Drive_Calc_2.3.1_KO_source.zip`에 있습니다.
 자세한 고지는 [SOURCE_OFFER.md](../../blob/v2.3.1-ko/SOURCE_OFFER.md)를 참고하세요.
+10-07 갱신 전 첫 배포판(패치 실행 파일 `5b3e9cdd…`)의 대응 소스는 커밋 [`d392fae`](../../tree/d392fae225df8ec2f83243bb0d16bba21b07b018/src)에 있습니다.
 
 원저작권: NTE Drive Calc contributors ([@hxwd94666](https://github.com/hxwd94666))

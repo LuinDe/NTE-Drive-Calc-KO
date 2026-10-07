@@ -187,7 +187,7 @@ class BattleHitReplayService(BattleDirectHitReplayMixin):
                 result = special_batch.submit(BattleToppleHitReplayService.replay,
                     hit=hit, analysis=hit_analysis,
                     character_configs=topple_character_configs or {},
-                    source_character_id=1054, formula_type="다포딜·추가 브레이크 피해",
+                    source_character_id=1054, formula_type="다포딜·추가 붕괴 피해",
                     projection_for_hit=projection_cache.project,
                 )
                 append_special(result, hit, formula_hit, evidence)

@@ -53,7 +53,7 @@ def _trigger_label(value: str) -> str:
         (("ultra", "q_begin", "q_action"), "Q 시작"),
         (("skill", "e_begin", "e_action"), "E 시작"),
         (("treatment", "cure", "heal"), "치료 발동"),
-        (("target_toppled", "unbalance"), "대상 브레이크"),
+        (("target_toppled", "unbalance"), "대상 붕괴"),
         (("dark_star", "nova"), "노바 정산"),
         (("damage_after_hit", "after_hit"), "피해를 준 후"),
         (("normalattack", "melee"), "일반 공격"),

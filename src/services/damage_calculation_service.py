@@ -318,7 +318,7 @@ class DamageCalculationService:
             values.enemy_topple_limit_multiplier_override is not None
             and values.enemy_topple_limit_multiplier_override < 0
         ):
-            raise ValueError("적 브레이크 구간 오버라이드는 음수일 수 없습니다.")
+            raise ValueError("적 붕괴 구간 오버라이드는 음수일 수 없습니다.")
 
         source = values.mitigation
         enemy_defense = calculate_enemy_defense_input(source)

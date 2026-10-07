@@ -363,8 +363,8 @@ def _resistance_formula_lines(factor: BattleHitReplayFactor) -> list[str]:
 def _factor_lines(factor: BattleHitReplayFactor) -> list[str]:
     if factor.factor_id.startswith("topple_character:"):
         lines = [
-            f"{factor.label} = 레벨 기본값 × 브레이크 강도 구간 × "
-            "적 브레이크 상한 구간 × 방어 구간 × 저항 구간",
+            f"{factor.label} = 레벨 기본값 × 붕괴 강도 구간 × "
+            "적 붕괴 상한 구간 × 방어 구간 × 저항 구간",
             f"  = {factor.formula}",
             f"  = {_factor_value(factor)}",
         ]
@@ -624,7 +624,7 @@ class BattleHitReplayExplanationService:
             )
             raw_damage = sum(factor.value for factor in topple_cells)
             lines.extend((
-                f"팀 브레이크 피해 = {expression}",
+                f"팀 붕괴 피해 = {expression}",
                 f"  = {substituted}",
                 f"  = floor({raw_damage:,.6f}) = {_damage(replay.non_critical_damage)}",
             ))
@@ -699,7 +699,7 @@ class BattleHitReplayExplanationService:
             row.interval_id: row for row in projection.decisions
         }
         if not allow_projection_fallback:
-            lines.append("Buff 투영 기준: 정식 공식 히트 뷰; 브레이크의 캐릭터별 속성은 기여 곱연산 구간을 기준으로 합니다.")
+            lines.append("Buff 투영 기준: 정식 공식 히트 뷰; 붕괴의 캐릭터별 속성은 기여 곱연산 구간을 기준으로 합니다.")
         lines.append(
             "【이번 히트 Buff: 투영됨 (공식에 반영되었는지는 곱연산 구간 참조)】"
             if not any(

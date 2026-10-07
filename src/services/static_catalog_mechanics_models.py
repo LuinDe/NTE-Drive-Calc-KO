@@ -76,7 +76,7 @@ FAMILIES = (
     MechanicsFamily("damage", "직접 피해 체인", "패널, 스킬 배율 및 직접 피해 총공식", "✦", "#58a6ff"),
     MechanicsFamily("multipliers", "통용 곱연산 구간", "피해 증가, 취약, 치명타, 방어 및 저항", "◈", "#bc8cff"),
     MechanicsFamily("states", "DOT 및 사이클", "악몽, 식심, 짐화 및 전체 사이클", "◌", "#ff7b72"),
-    MechanicsFamily("settlement", "브레이크 및 정산", "팀 브레이크, 특수 정산 및 HP 변화", "◇", "#39d0d8"),
+    MechanicsFamily("settlement", "붕괴 및 정산", "팀 붕괴, 특수 정산 및 HP 변화", "◇", "#39d0d8"),
 )
 FAMILY_BY_KEY = {family.key: family for family in FAMILIES}
 

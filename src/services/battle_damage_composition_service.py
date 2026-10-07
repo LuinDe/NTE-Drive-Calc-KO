@@ -57,7 +57,7 @@ _SPECIAL_EFFECT_LABELS = {
     "ge_player_kuhara_seedreaction_damage": ("direct_follow_up", "추가 공격"),
     "ge_player_daffodill_extraunbalance_damage": (
         "special_daffodill_extra_topple",
-        "다포딜·추가 브레이크 피해",
+        "다포딜·추가 붕괴 피해",
     ),
     "ge_player_lacrimosa_blood_damage": ("special_nightmare", "噩梦"),
     "ge_player_lacrimosa_blood_damage_lv6": ("special_nightmare", "噩梦"),
@@ -726,9 +726,9 @@ class BattleDamageCompositionService:
                     has_replay = hit.event_id in replay_by_event
                     public_damage["unattributed_topple"] += hit.damage
                     public_labels["unattributed_topple"] = (
-                        "브레이크 귀속 근거 부족"
+                        "붕괴 귀속 근거 부족"
                         if has_replay
-                        else "브레이크 귀속 계산 대기"
+                        else "붕괴 귀속 계산 대기"
                     )
                     if has_replay:
                         unresolved_topple_attribution = True

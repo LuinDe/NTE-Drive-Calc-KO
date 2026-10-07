@@ -360,7 +360,7 @@ class BattleReportAnalysisControllerMixin:
         if message == "작업이 취소되었습니다":
             return
         if request.load.detail_level == "composition":
-            self._page.show_analysis_detail_error(f"브레이크 귀속이 완료되지 않음: {message}")
+            self._page.show_analysis_detail_error(f"붕괴 귀속이 완료되지 않음: {message}")
         elif request.load.detail_level in {"hit", "buff"}:
             self._page.show_analysis_detail_error(f"현재 상세 정보가 완료되지 않음: {message}")
         elif request.load.detail_level == "marginal":

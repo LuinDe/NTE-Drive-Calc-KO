@@ -90,11 +90,11 @@ class BattleHitFormulaDialog(HitInspectionDialog):
             )
             sections.append(
                 "【연관 후보 추가 정산】\n"
-                "위의 팀 브레이크와 모든 캐릭터 기여는 완전히 유지됩니다. 아래 후보 이벤트는 같은 트리거 시점에 추가로 더해질 뿐,"
-                "원본 팀 브레이크를 대체하지 않습니다.\n"
+                "위의 팀 붕괴와 모든 캐릭터 기여는 완전히 유지됩니다. 아래 후보 이벤트는 같은 트리거 시점에 추가로 더해질 뿐,"
+                "원본 팀 붕괴를 대체하지 않습니다.\n"
                 f"고정축 정산 클러스터 = 위의 조정 후 히트 {base:,.2f} + "
                 f"연관 추가 {added:,.2f} = {base + added:,.2f}\n"
-                f"후보 공식 감사 합계 = 팀 브레이크 공식 {formula_base:,.2f} + "
+                f"후보 공식 감사 합계 = 팀 붕괴 공식 {formula_base:,.2f} + "
                 f"5각성 추가 공식 {formula_added:,.2f} = "
                 f"{formula_base + formula_added:,.2f}"
             )

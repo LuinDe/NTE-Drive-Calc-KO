@@ -113,7 +113,7 @@ class BattleMarginalDerivedSettlementView(QFrame):
                 f"{first.quantification.explanation}"
             )
             values = (
-                "다포딜 5각성·추가 브레이크",
+                "다포딜 5각성·추가 붕괴",
                 first.source_event_id,
                 f"총 {1 + len(group)}회 (기본 1 + 추가 {len(group)})",
                 f"{per_settlement:,.2f}",
@@ -124,7 +124,7 @@ class BattleMarginalDerivedSettlementView(QFrame):
             )
             tooltip = (
                 f"총 횟수 = 0각성 기본 1회 + 5각성 추가 {len(group)}회;\n"
-                f"추가 이득 = 통찰 중첩 수 {len(group)} × 다포딜 개인 브레이크 1회분"
+                f"추가 이득 = 통찰 중첩 수 {len(group)} × 다포딜 개인 붕괴 1회분"
                 f" {per_settlement:,.2f} = {gain:,.2f}\n"
                 f"{first.quantification.explanation}\n"
                 "더블 클릭하면 후보 피해 공식을 볼 수 있습니다. 원본 축 트리거 히트 자체는 독립적으로 유지됩니다."

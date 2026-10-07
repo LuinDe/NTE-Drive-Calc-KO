@@ -109,7 +109,7 @@ _CATALOG = (
     _passive(1046, "「零」", "GA_Female_Passive_2", "异象感知力", 4, "skill_modifier", "protagonist-q-damage", "제로의 极轨终结만 통용 피해 증강 획득"),
     _passive(1052, "浔", "GA_Jin_Passive_1", "鬼兰家纹", 2, "action_lifecycle", "creation-time-stop", "시간 정지 중 블라썸 히트 유지, 상시 패시브는 반사실로 제거하지 않음"),
     _passive(1052, "浔", "GA_Jin_Passive_2", "天下万宝", 4, "skill_multiplier", "jin-q-terminal", "종결 단계 기본 배율 ×2"),
-    _passive(1054, "达芙蒂尔", "GA_Daffodill_Passive_1", "破鞘", 2, "target_state", "dissonance-topple-cap", "대상 2중첩 시 그룹 전체 브레이크 상한 갱신"),
+    _passive(1054, "达芙蒂尔", "GA_Daffodill_Passive_1", "破鞘", 2, "target_state", "dissonance-topple-cap", "대상 2중첩 시 그룹 전체 붕괴 상한 갱신"),
     _passive(1054, "达芙蒂尔", "GA_Daffodill_Passive_2", "空蝉", 4, "skill_modifier", "daffodill-entry-damage", "幻影移行만 통용 피해 증강 획득"),
     _passive(1055, "九原", "GA_Kuhara_Passive_1", "顺势而获", 2, "action_lifecycle", "creation-cap", "고정 축에 블라썸 히트 유지 및 2그루·6그루 상한 등록"),
     _passive(1055, "九原", "GA_Kuhara_Passive_2", "风声为我所用", 4, "derived_hit", "kuhara-rose-settlement", "대상 玫约 상태에 따라 15배율 추가 청산 귀속"),

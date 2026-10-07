@@ -135,7 +135,7 @@ class BattleBuildTimelineProjectionService:
                 character_name="达芙蒂尔",
                 direction="outgoing",
                 channel_key="special_daffodill_extra_topple",
-                channel_label="후보 5각성·추가 브레이크",
+                channel_label="후보 5각성·추가 붕괴",
                 damage_name=row.damage_name,
                 source_skill_name=row.skill_name,
                 ability_id="character_awaken:1054:Effect5",

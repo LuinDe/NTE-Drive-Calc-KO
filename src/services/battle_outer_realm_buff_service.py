@@ -59,7 +59,7 @@ def outer_realm_requirement_applies(
         return True, ""
     target_id = requirement.removeprefix(_TARGET_REQUIREMENT_PREFIX)
     if hit.target_id != target_id:
-        return False, "이 궤외 피해 증가는 이번에 브레이크에 진입한 대상에만 적용됩니다"
+        return False, "이 궤외 피해 증가는 이번에 붕괴에 진입한 대상에만 적용됩니다"
     return True, ""
 
 
@@ -399,9 +399,9 @@ class BattleOuterRealmBuffService:
                     requirement=f"{_TARGET_REQUIREMENT_PREFIX}{hit.target_id}",
                 ),
                 inference_basis=(
-                    f"{hit.gameplay_effect_id}이(가) 대상의 브레이크 진입을 증명합니다; 해당 대상의 정식 "
+                    f"{hit.gameplay_effect_id}이(가) 대상의 붕괴 진입을 증명합니다; 해당 대상의 정식 "
                     f"UnbalMax={limit:g} ÷ UnbalReduceReset={speed:g}에 따라,"
-                    "시간 정지 차감 시계 위에 브레이크 회복 구간을 재구성합니다."
+                    "시간 정지 차감 시계 위에 붕괴 회복 구간을 재구성합니다."
                 ),
             ))
         return tuple(result)

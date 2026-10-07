@@ -66,7 +66,7 @@ MENU_ENTRIES = (
     ),
     CatalogMenuEntry(
         "combat_mechanics", "mechanics", "전투 메커니즘 도감", "COMBAT MECHANICS",
-        "사이클, 지속 피해, 브레이크, 소환 및 피해 공식.", "#bc8cff", "메커니즘",
+        "사이클, 지속 피해, 붕괴, 소환 및 피해 공식.", "#bc8cff", "메커니즘",
         "attribute", ("def_ignore",),
     ),
 )

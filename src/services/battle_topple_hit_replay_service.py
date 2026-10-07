@@ -141,7 +141,7 @@ def _baselines_for_hit(
         return (), (
             f"이 히트는 {half_name}에 속하지만, 정식 히트별 확인에서"
             f"같은 하프 캐릭터가 {len(observed_names)}명(예상 4명)"
-            "만 확인되어 팀 브레이크를 완전히 리플레이할 수 없습니다",
+            "만 확인되어 팀 붕괴를 완전히 리플레이할 수 없습니다",
         )
 
     baselines_by_id = {row.character_id: row for row in analysis.baselines}
@@ -198,7 +198,7 @@ class BattleToppleHitReplayService:
         analysis: BattleAnalysisSnapshot,
         character_configs: Mapping[int, BattleToppleCharacterConfig],
         source_character_id: int | None = None,
-        formula_type: str = "브레이크 피해 (캐릭터별 합산)",
+        formula_type: str = "붕괴 피해 (캐릭터별 합산)",
         projection_for_hit: Callable[[BattleAnalysisHit], BattleHitBuffProjection] | None = None,
     ) -> BattleHitReplayResult:
         condition = analysis.target_condition
@@ -234,7 +234,7 @@ class BattleToppleHitReplayService:
             config = character_configs.get(baseline.character_id)
             if config is None:
                 missing.append(
-                    f"{baseline.character_name}에게 정적 속성 또는 브레이크 레벨 곡선이 없습니다"
+                    f"{baseline.character_name}에게 정적 속성 또는 붕괴 레벨 곡선이 없습니다"
                 )
                 continue
             projection, cell_inputs = cls._character_inputs(
@@ -277,7 +277,7 @@ class BattleToppleHitReplayService:
         )
         factors.insert(0, BattleHitReplayFactor(
             factor_id="topple_target",
-            label="적 브레이크 상한 구간",
+            label="적 붕괴 상한 구간",
             value=target_multiplier,
             evidence_basis=(
                 f"사용자가 확인한 대상 속성 패키지 UnbalMax={condition.enemy_topple_limit:g}"
@@ -287,7 +287,7 @@ class BattleToppleHitReplayService:
             terms=(_term(
                 term_id="target:UnbalMax",
                 property_id="UnbalMax",
-                label="적 브레이크 상한",
+                label="적 붕괴 상한",
                 value=condition.enemy_topple_limit,
                 source_group="target",
                 source_name="적",
@@ -306,10 +306,10 @@ class BattleToppleHitReplayService:
             confidence=confidence,
             factors=tuple(factors),
             missing_evidence=((
-                "다포딜 추가 브레이크 정산은 다포딜 본인의 브레이크 기여만 리플레이"
-                "하며, 정적 TRUE 태그는 브레이크의 방어·저항 규칙을 바꾸지 않습니다"
+                "다포딜 추가 붕괴 정산은 다포딜 본인의 붕괴 기여만 리플레이"
+                "하며, 정적 TRUE 태그는 붕괴의 방어·저항 규칙을 바꾸지 않습니다"
             ),) if source_character_id is not None else (
-                "브레이크 이벤트의 캐릭터별 분량은 공식 리플레이로 얻습니다. nte-core는 현재 팀 합계만 보고합니다",
+                "붕괴 이벤트의 캐릭터별 분량은 공식 리플레이로 얻습니다. nte-core는 현재 팀 합계만 보고합니다",
             ),
             formula_type=formula_type,
             critical_rate=0.0,
@@ -383,7 +383,7 @@ class BattleToppleHitReplayService:
                 label="레벨 기초값",
                 value=config.level_multiplier,
                 source_group="static",
-                source_name="공식 브레이크 레벨 곡선",
+                source_name="공식 붕괴 레벨 곡선",
                 is_percent=False,
                 basis=f"캐릭터 레벨 {baseline.character_level:g}",
             ),
@@ -431,7 +431,7 @@ class BattleToppleHitReplayService:
     def _unreplayable(
         hit: BattleAnalysisHit,
         *reasons: str,
-        formula_type: str = "브레이크 피해 (캐릭터별 합산)",
+        formula_type: str = "붕괴 피해 (캐릭터별 합산)",
     ) -> BattleHitReplayResult:
         return BattleHitReplayResult(
             event_id=hit.event_id,

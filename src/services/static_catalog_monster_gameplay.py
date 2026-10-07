@@ -38,7 +38,7 @@ _GAP_LABELS = {
 _TRIGGER_LABELS = {
     "whole_battle": "상시 적용",
     "corruption_damage_stack": "지정 피해를 입힌 후 중첩",
-    "while_target_toppled": "대상 브레이크 중 적용",
+    "while_target_toppled": "대상 붕괴 중 적용",
 }
 
 

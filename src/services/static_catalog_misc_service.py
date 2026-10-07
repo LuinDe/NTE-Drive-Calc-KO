@@ -173,7 +173,7 @@ _FIELD_LABELS = {
     "damage_type": "피해 유형",
     "damage_source_category": "피해 출처 분류",
     "charge_add": "에너지 충전 증가",
-    "unbal_value": "브레이크 수치",
+    "unbal_value": "붕괴 수치",
     "heterochrome_add": "이능력 증가",
     "fixed_crit_rate": "고정 치명 확률",
     "atk_rate_base": "공격 배율 배열",

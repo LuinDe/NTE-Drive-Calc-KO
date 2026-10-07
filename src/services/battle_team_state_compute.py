@@ -85,9 +85,9 @@ def outer_intervals(backend, config, *, hits, battle_end_us, time_stop_intervals
             hit = hits[row["index"]]
             suffix, trigger = f"topple:{hit.event_id}", "TARGET_TOPPLED"
             requirement = f"battle-target|id={hit.target_id}"
-            basis = (f"{hit.gameplay_effect_id}이(가) 대상의 브레이크 진입을 증명합니다; 해당 대상의 정식 "
+            basis = (f"{hit.gameplay_effect_id}이(가) 대상의 붕괴 진입을 증명합니다; 해당 대상의 정식 "
                      f"UnbalMax={float(config.topple_limit):g} ÷ UnbalReduceReset={float(config.topple_recovery_speed):g}에 따라, "
-                     "시간 정지 차감 시계 위에 브레이크 회복 구간을 재구성합니다.")
+                     "시간 정지 차감 시계 위에 붕괴 회복 구간을 재구성합니다.")
         else:
             raise ValueError("Unknown native outer state kind")
         result.append(BattleOuterRealmBuffService._base_interval(
@@ -122,16 +122,16 @@ def daffodill_intervals(
             name, interval_id = f"탈바꿈·E 강화 ({stacks}중첩)", f"buff:daffodill:qte-e:{action.action_id}"
             policy, trigger = "ConsumeAllOnEAction", "INFERRED_DAFFODILL_QTE_CONSUMED_BY_E"
             basis = ("추정된 QTE마다 1중첩씩 최대 2중첩까지 누적되며, 다음 추정된 E가 전부 소모합니다;"
-                     "고정 축은 E 통용 피해만 투영하며 불균형 게이지와 브레이크 시점은 역추정하지 않습니다.")
+                     "고정 축은 E 통용 피해만 투영하며 불균형 게이지와 붕괴 시점은 역추정하지 않습니다.")
             modifiers = (_modifier("DamageUpGeneralBase", row["value"], source_require_tags=("State.Damage.Skill",)),)
             options["source_kind"] = "confirmed_character_action_resource"
         elif kind == "effect4":
             hit = hits[row["index"]]
             identity = definition = "character_awaken:1054:Effect4"
-            name, interval_id = f"통찰·브레이크 피해 증가 ({stacks}중첩)", f"buff:daffodill:effect4:{hit.event_id}"
+            name, interval_id = f"통찰·붕괴 피해 증가 ({stacks}중첩)", f"buff:daffodill:effect4:{hit.event_id}"
             policy, trigger = "ObservedToppleSettlementCluster", "INFERRED_DAFFODILL_INSIGHT_TOPPLE"
             basis = ("Q 동작은 같은 대상에 통찰을 최대 2중첩까지 부여합니다; 4각은 중첩당,"
-                     "다포딜 본인의 브레이크 피해만 높입니다. 구간은 축에서 관측된 같은 대상의 브레이크 정산 묶음만 포함합니다.")
+                     "다포딜 본인의 붕괴 피해만 높입니다. 구간은 축에서 관측된 같은 대상의 붕괴 정산 묶음만 포함합니다.")
             modifiers = (_modifier("UnbalDamageUp", row["value"], requirement=f"battle-hit-target|id={hit.target_id}"),)
         elif kind == "effect5":
             hit = hits[row["index"]]
@@ -148,7 +148,7 @@ def daffodill_intervals(
             identity = definition = "character_awaken:1054:resonance_6"
             name, interval_id = "6각 공명·암속성 저항 감소", f"buff:daffodill:resonance6:{hit.event_id}"
             policy, trigger = "ReliableToppleDurationActiveClock", "INFERRED_DAFFODILL_RESONANCE_SIX_TOPPLE"
-            basis = ("일반 각성 6개가 활성화되었습니다; 관측된 브레이크 정산 1마이크로초 후부터,"
+            basis = ("일반 각성 6개가 활성화되었습니다; 관측된 붕괴 정산 1마이크로초 후부터,"
                      "플레이 설정에서 검증 가능한 불균형 상한/회복 속도에 따라 지속되며 시간 정지는 유효 시간을 소모하지 않습니다.")
             modifiers = (_modifier("DamageResistChaosBase", -0.15),)
             options.update(target_scope="target", stack_limit_count=1)

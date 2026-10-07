@@ -119,9 +119,9 @@ class BattleDaffodillMarginalService:
             )
             confidence = "高" if settlement is not None else "中"
             anchor_basis = (
-                "같은 대상의 관측된 추가 브레이크 공식"
+                "같은 대상의 관측된 추가 붕괴 공식"
                 if settlement is not None
-                else "팀 브레이크 내 다포딜 지분"
+                else "팀 붕괴 내 다포딜 지분"
             )
             if settlement is None:
                 factor = next((
@@ -146,7 +146,7 @@ class BattleDaffodillMarginalService:
                     character_id=1054,
                     character_name="达芙蒂尔",
                     skill_name="完美真相",
-                    damage_name=f"5각 추가 브레이크·통찰 {ordinal}중첩",
+                    damage_name=f"5각 추가 붕괴·통찰 {ordinal}중첩",
                     baseline_damage=0.0,
                     known_projection_damage=float(settlement),
                     candidate_damage=float(settlement),
@@ -159,7 +159,7 @@ class BattleDaffodillMarginalService:
                         included_dimension_ids=("candidate_derived_settlement",),
                         explanation=(
                             f"후보 5각은 원본 축의 같은 대상 통찰 {ordinal}중첩에 따라,"
-                            f"기존 브레이크 시점에 다포딜 개인 브레이크 정산을 1회 추가합니다;"
+                            f"기존 붕괴 시점에 다포딜 개인 붕괴 정산을 1회 추가합니다;"
                             f"0각 기본 정산 1회는 원본 히트가 그대로 유지하므로 총 횟수는 1 + 통찰 중첩 수입니다; 공식 앵커:"
                             f"{anchor_basis}"
                         ),
@@ -242,10 +242,10 @@ class BattleDaffodillMarginalService:
             confidence=row.quantification.confidence,
             factors=factors,
             missing_evidence=(
-                "후보 5각은 통찰 중첩 수만큼 다포딜 개인 브레이크 정산을 추가합니다;"
+                "후보 5각은 통찰 중첩 수만큼 다포딜 개인 붕괴 정산을 추가합니다;"
                 f"원본 축 발동 히트 {row.source_event_id}은(는) 그대로 유지됩니다.",
             ),
-            formula_type="후보 5각·추가 브레이크 피해",
+            formula_type="후보 5각·추가 붕괴 피해",
             critical_rate=0.0,
             expected_damage=BattleDaffodillMarginalService.candidate_damage(row),
             critical_policy="disabled",

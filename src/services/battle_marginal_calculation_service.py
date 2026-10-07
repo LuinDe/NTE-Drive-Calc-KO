@@ -345,7 +345,7 @@ class BattleMarginalCalculationService:
                     character_id=character_id, units=(0.0, unit),
                     backend=available_battle_compute(None if native is None else native.backend),
                     checkpoint=lambda: report_battle_analysis_progress(
-                        progress_callback, phase="marginal", message="캐릭터별 브레이크 기여를 일괄 비교하는 중…",
+                        progress_callback, phase="marginal", message="캐릭터별 붕괴 기여를 일괄 비교하는 중…",
                     ),
                 )
                 topple_hits = tuple(hit for hit, ratio in zip(outgoing_hits, retained, strict=True) if ratio is not None)

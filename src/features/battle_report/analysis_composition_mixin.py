@@ -122,13 +122,13 @@ class BattleAnalysisCompositionMixin:
         )
         if composition.pending_topple_attribution:
             self.composition_status_label.setText(
-                "현재 구간에 팀 브레이크가 포함되어 있지만 캐릭터별 공식을 아직 불러오지 않았습니다."
+                "현재 구간에 팀 붕괴가 포함되어 있지만 캐릭터별 공식을 아직 불러오지 않았습니다."
             )
             if self._topple_detail_requested_analysis is not analysis:
                 QTimer.singleShot(0, self._request_topple_attribution)
         elif composition.unresolved_topple_attribution:
             self.composition_status_label.setText(
-                "브레이크에 명확한 대상이나 공식 근거가 없어 일단 미귀속으로 분류합니다."
+                "붕괴에 명확한 대상이나 공식 근거가 없어 일단 미귀속으로 분류합니다."
             )
 
     def _request_topple_attribution(self) -> None:

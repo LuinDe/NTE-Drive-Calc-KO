@@ -18,10 +18,10 @@ ATTRIBUTE_NAMES = {
     "hp": "현재 생명력", "maxHp": "최대 HP", "shield": "보호막", "attack": "攻击力",
     "defense": "防御力", "crit": "暴击率", "critDamage": "暴击伤害", "mag": "环合强度",
     "damageUpGeneral": "범용 피해 증가", "chargeCurrent": "현재 충전", "chargeMax": "충전 상한",
-    "unbalCurrent": "현재 브레이크", "unbalMax": "브레이크 상한", "unbalIntensity": "倾陷强度",
-    "unbalAccrueEfficiency": "브레이크 누적 효율", "unbalAntiAccrueEfficiency": "브레이크 누적 저항 효율",
-    "unbalSpeed": "브레이크 속도", "unbalBonus": "브레이크 보너스", "unbalReduceNatur": "브레이크 자연 감소",
-    "unbalValueAdd": "브레이크 수치 부가", "isBalancedingState": "브레이크 관련 상태",
+    "unbalCurrent": "현재 붕괴", "unbalMax": "붕괴 상한", "unbalIntensity": "倾陷强度",
+    "unbalAccrueEfficiency": "붕괴 누적 효율", "unbalAntiAccrueEfficiency": "붕괴 누적 저항 효율",
+    "unbalSpeed": "붕괴 속도", "unbalBonus": "붕괴 보너스", "unbalReduceNatur": "붕괴 자연 감소",
+    "unbalValueAdd": "붕괴 수치 부가", "isBalancedingState": "붕괴 관련 상태",
 }
 for _element, _name in (
     ("Normal", "일반"), ("Cosmos", "光"), ("Nature", "灵"), ("Incantation", "咒"),

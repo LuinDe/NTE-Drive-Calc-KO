@@ -270,7 +270,7 @@ class BattleLongAnalysisView(
         self.composition_status_label.hide()
         composition_controls.addWidget(self.composition_status_label)
         composition_controls.addStretch()
-        self.composition_topple_button = QPushButton("정밀 브레이크 귀속 계산")
+        self.composition_topple_button = QPushButton("정밀 붕괴 귀속 계산")
         self.composition_topple_button.clicked.connect(
             self._request_topple_attribution
         )

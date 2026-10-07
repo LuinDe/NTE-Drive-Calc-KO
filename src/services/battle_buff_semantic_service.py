@@ -72,7 +72,7 @@ _BUFF_DISPLAY_NAMES = {
     "buff_lacrimosa004_level5_cure": "5각성: 噩梦 HP 상한 정산",
     "buff_fadia_nodiesharedamage": "观众目击的祭献: 분담 보호",
     "buff_fadia_shareoutteammatesdamage": "观众目击的祭献: 피해 분담",
-    "buff_daffodillunbalup": "다포딜: 브레이크 피해 상승",
+    "buff_daffodillunbalup": "다포딜: 붕괴 피해 상승",
     "buff_female051_level3": "奇异记叙",
     "buff_female051_level4": "未决迷数",
     "buff_female051_level5_1": "默示赋命",

@@ -99,10 +99,10 @@ _PLAYER_FORMULAS: dict[
     ),
     "topple_damage": (
         "倾陷伤害",
-        "브레이크 피해 = 레벨 곡선 × 브레이크 강도 × 브레이크 상한 × 방어 × 저항",
-        (("레벨 곡선", "팀 내 같은 하프의 각 캐릭터가 각자 자신의 레벨에 대응하는 브레이크 곡선을 사용합니다."),
-         ("倾陷强度", "각 캐릭터가 각자 자신의 브레이크 강도와 브레이크 피해 증가를 사용합니다."),
-         ("브레이크 상한", "팀 전체의 각 칸이 공통으로 이번 피격 대상의 브레이크 상한 또는 고정 단계 오버라이드를 사용합니다."),
+        "붕괴 피해 = 레벨 곡선 × 붕괴 강도 × 붕괴 상한 × 방어 × 저항",
+        (("레벨 곡선", "팀 내 같은 하프의 각 캐릭터가 각자 자신의 레벨에 대응하는 붕괴 곡선을 사용합니다."),
+         ("倾陷强度", "각 캐릭터가 각자 자신의 붕괴 강도와 붕괴 피해 증가를 사용합니다."),
+         ("붕괴 상한", "팀 전체의 각 칸이 공통으로 이번 피격 대상의 붕괴 상한 또는 고정 단계 오버라이드를 사용합니다."),
          ("방어/저항", "각 칸의 관통은 해당 캐릭터에서, 방어력·대응 속성 저항·디버프는 피격 대상에서 가져옵니다.")),
     ),
     "weave_followup": (
@@ -188,7 +188,7 @@ _PLAYER_FORMULA_STEPS: dict[str, tuple[str, ...]] = {
     ),
     "topple_damage": (
         "같은 하프의 전체 편성과 같은 피격 대상을 고정합니다.",
-        "각 캐릭터가 각자 레벨 곡선, 브레이크 강도, 관통과 고유 피해 속성을 읽습니다.",
+        "각 캐릭터가 각자 레벨 곡선, 붕괴 강도, 관통과 고유 피해 속성을 읽습니다.",
         "캐릭터별로 계산해 합산하고 최종 출구에서 내림합니다.",
     ),
     "weave_followup": (
@@ -422,8 +422,8 @@ class StaticCatalogMechanicsDetailProjector:
             "buff_trigger_unresolved": "Buff 발동 조건 미확인",
             "max_hp_axis_continuity_unavailable": "최대 HP 상태 축 불연속",
             "max_hp_source_attribution_unresolved": "최대 HP 변화 출처 미확인",
-            "topple_duration_unreliable": "브레이크 지속 시간 근거 신뢰 불가",
-            "topple_special_settlement_unobserved": "브레이크 특수 정산 미관측",
+            "topple_duration_unreliable": "붕괴 지속 시간 근거 신뢰 불가",
+            "topple_special_settlement_unobserved": "붕괴 특수 정산 미관측",
             "treatment_event_evidence_missing": "정식 치료 이벤트 근거 없음",
             "treatment_formula_source_unresolved": "치료 공식 출처 미확인",
         }

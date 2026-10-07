@@ -364,10 +364,10 @@ def evaluate_interval_projection(
                 interval_reasons.append("3각성 Q의 CoefModify는 정식 스킬 배율 근거가 이미 소비했으므로 확인 대기 속성으로 다시 투영하지 않습니다")
                 continue
             if property_id in _TOPPLE_ONLY_PROPERTIES and channel_id not in _TOPPLE_CHANNELS:
-                interval_reasons.append(f"{property_id}은(는) 브레이크 피해의 캐릭터별 칸에만 포함됨")
+                interval_reasons.append(f"{property_id}은(는) 붕괴 피해의 캐릭터별 칸에만 포함됨")
                 continue
             if channel_id in _TOPPLE_CHANNELS and property_id not in _TOPPLE_FORMULA_PROPERTIES:
-                interval_reasons.append(f"{property_id}은(는) 브레이크의 캐릭터별 공식에 포함되지 않음")
+                interval_reasons.append(f"{property_id}은(는) 붕괴의 캐릭터별 공식에 포함되지 않음")
                 continue
             if channel_id == "reaction_nova" and property_id not in {
                 "MagBase",

@@ -178,7 +178,7 @@ def _formula_entries(
                 FormulaVariable("Independent", "명시적으로 독립된 최종 출처별 배수"),
             ),
             applicable_when=("일반 직접 피해이면서 필수 스킬·패널·대상 공식 입력을 해석할 수 있음",),
-            limitations=("DOT·브레이크·헥스·HP 상한 정산은 각자의 출구를 사용합니다.",),
+            limitations=("DOT·붕괴·헥스·HP 상한 정산은 각자의 출구를 사용합니다.",),
             evidence=(
                 _ref("project_contract", contract, "직접 피해 총공식", "프로젝트 골드 스탠더드 곱연산 구간 순서"),
                 _ref(
@@ -364,10 +364,10 @@ def _formula_entries(
             ),
             boundary="project_rule",
             variables=(
-                FormulaVariable("LevelCurve", "캐릭터 레벨에 대응하는 정식 브레이크 곡선"),
-                FormulaVariable("UnbalMax", "대상 브레이크 상한 또는 고정 단계 오버라이드"),
+                FormulaVariable("LevelCurve", "캐릭터 레벨에 대응하는 정식 붕괴 곡선"),
+                FormulaVariable("UnbalMax", "대상 붕괴 상한 또는 고정 단계 오버라이드"),
             ),
-            applicable_when=("브레이크 정산 행에 같은 하프의 완전한 캐릭터 및 대상 프로필 근거가 있음",),
+            applicable_when=("붕괴 정산 행에 같은 하프의 완전한 캐릭터 및 대상 프로필 근거가 있음",),
             limitations=("디스코드 15% 상한 감소는 프로젝트 기본 모델이며, 공식 검증된 기본 비율로 가장하지 않습니다.",),
             evidence=(
                 _ref("project_contract", contract, "倾陷伤害", "5개 곱연산 구간 규칙"),
@@ -404,7 +404,7 @@ def _formula_entries(
             expression="Settlement = floor(max(0, FullPrecisionDamage))",
             boundary="project_rule",
             variables=(FormulaVariable("FullPrecisionDamage", "적용되는 모든 곱연산 구간의 전체 정밀도 곱"),),
-            applicable_when=("한 번의 실제 직접 피해·DOT·특수 피해·헥스 또는 브레이크 출구",),
+            applicable_when=("한 번의 실제 직접 피해·DOT·특수 피해·헥스 또는 붕괴 출구",),
             limitations=("중간 속성과 곱연산 구간은 내림하지 않으며, 치명 기댓값은 소수를 허용합니다.",),
             evidence=(
                 _ref("project_contract", contract, "직접 피해 총공식", "최종 출구에서 일괄 내림"),
@@ -511,7 +511,7 @@ def _support_entries(
             evidence=(
                 _ref("official_static", static_db, "character_awaken_effect", f"normalized effects={snapshot.awakening_effect_rows}"),
                 _ref("official_static", static_db, "character_awaken_skill_level_bonus", f"structured bonuses={snapshot.awakening_skill_level_bonus_rows}"),
-                _ref("implementation", "src/services/battle_daffodill_awakening_service.py", "BattleDaffodillAwakeningService", "다포딜 통찰/브레이크 전용 리플레이"),
+                _ref("implementation", "src/services/battle_daffodill_awakening_service.py", "BattleDaffodillAwakeningService", "다포딜 통찰/붕괴 전용 리플레이"),
                 _ref("public_behavior_test", "tests/test_battle_daffodill_awakening_service.py", "BattleDaffodillAwakeningServiceTests", "효과 선택·중첩·정산 제한"),
             ),
             consumer_entries=("BattleConfirmedAwakeningBuffService.get", "BattleDaffodillAwakeningService.infer"),
@@ -596,10 +596,10 @@ def _support_entries(
         CounterfactualSupportEntry(
             key="topple_base_formula",
             category="倾陷",
-            mechanism="기본 브레이크 5개 곱연산 구간",
-            scope="완전한 같은 하프 편성과 고정된 대상 브레이크 프로필에서의 캐릭터 기여",
+            mechanism="기본 붕괴 5개 곱연산 구간",
+            scope="완전한 같은 하프 편성과 고정된 대상 붕괴 프로필에서의 캐릭터 기여",
             status="complete",
-            modeling_scheme="캐릭터별로 레벨·브레이크 강도·대상 상한·방어력·저항을 리플레이하고 합산합니다.",
+            modeling_scheme="캐릭터별로 레벨·붕괴 강도·대상 상한·방어력·저항을 리플레이하고 합산합니다.",
             evidence=(
                 _ref("implementation", "src/services/damage_calculation_service.py", "DamageCalculationService.calculate_topple", "5개 곱연산 구간 공식"),
                 _ref("implementation", "src/services/battle_topple_hit_replay_service.py", "BattleToppleHitReplayService.replay", "전투 리포트 캐릭터별 소비자"),
@@ -614,10 +614,10 @@ def _support_entries(
         CounterfactualSupportEntry(
             key="topple_special_states",
             category="倾陷",
-            mechanism="브레이크 전용 각성·창·추가 정산",
-            scope="다포딜 통찰/각성·궤외 브레이크 창 및 감사 완료 추가 피해",
+            mechanism="붕괴 전용 각성·창·추가 정산",
+            scope="다포딜 통찰/각성·궤외 붕괴 창 및 감사 완료 추가 피해",
             status="partial",
-            modeling_scheme="기본 브레이크 리플레이 위에 명시적 창·후보 정산·신뢰할 수 있는 지속 시간 요건을 겹쳐 적용합니다.",
+            modeling_scheme="기본 붕괴 리플레이 위에 명시적 창·후보 정산·신뢰할 수 있는 지속 시간 요건을 겹쳐 적용합니다.",
             evidence=(
                 _ref("implementation", "src/services/battle_daffodill_awakening_service.py", "BattleDaffodillAwakeningService", "통찰 중첩과 각성 전용 규칙"),
                 _ref("public_behavior_test", "tests/test_battle_daffodill_awakening_service.py", "test_resonance_six_requires_reliable_topple_duration", "신뢰할 수 있는 지속 시간이 없으면 완료로 판정하지 않음"),
@@ -625,8 +625,8 @@ def _support_entries(
             consumer_entries=("BattleDaffodillMarginalService.derived_rows", "BattleBuildCounterfactualService.compare"),
             gap_codes=("topple_duration_unreliable", "topple_special_settlement_unobserved"),
             covered_dataset=dataset,
-            covered_entities=("达芙蒂尔", "궤외 브레이크 버프"),
-            limitations=("브레이크 GE가 존재한다고 해서 캐릭터 전용 소비 체인이 완료된 것은 아닙니다.",),
+            covered_entities=("达芙蒂尔", "궤외 붕괴 버프"),
+            limitations=("붕괴 GE가 존재한다고 해서 캐릭터 전용 소비 체인이 완료된 것은 아닙니다.",),
         ),
         CounterfactualSupportEntry(
             key="attachments",
@@ -749,7 +749,7 @@ def _support_entries(
             gap_codes=("native_production_consumer_unavailable", "native_stateful_mechanics_unavailable"),
             covered_dataset=dataset,
             covered_entities=("가산 패널/피해 증가/치명", "대상 저항", "DefIgnore", "Buff 8개 / 히트 56회 공개 차분"),
-            limitations=("DOT·브레이크·반응·상태 머신·프로세스 생명주기는 이전되지 않았으며, unavailable을 ratio=1로 변환해서는 안 됩니다.",),
+            limitations=("DOT·붕괴·반응·상태 머신·프로세스 생명주기는 이전되지 않았으며, unavailable을 ratio=1로 변환해서는 안 됩니다.",),
         ),
         CounterfactualSupportEntry(
             key="unknown_preservation",

@@ -205,8 +205,8 @@ def _rules_rose(selected: Any, factory: type[Any]) -> tuple[Any, ...]:
             factory,
             suffix="rose-topple-extension",
             name=(
-                f"最后一朵玫瑰: 브레이크 1회당 {topple_extension:g}초 연장"
-                "(대상별 브레이크 수명 주기 기록 기능 없음)"
+                f"最后一朵玫瑰: 붕괴 1회당 {topple_extension:g}초 연장"
+                "(대상별 붕괴 수명 주기 기록 기능 없음)"
             ),
             scope="unknown",
             modifiers=(_modifier("ToppleDurationAdd", topple_extension),),
@@ -356,7 +356,7 @@ def _rules_whale(selected: Any, factory: type[Any]) -> tuple[Any, ...]:
             selected,
             factory,
             suffix="whale-topple-target",
-            name="鲸之歌: 브레이크 대상 피해",
+            name="鲸之歌: 붕괴 대상 피해",
             scope="unknown",
             modifiers=(_modifier(
                 "DamageUpGeneralBase",
@@ -369,7 +369,7 @@ def _rules_whale(selected: Any, factory: type[Any]) -> tuple[Any, ...]:
             factory,
             suffix="whale-topple-kill-heal",
             name=(
-                f"鲸之歌: 브레이크 처치 시 최대 HP의 {heal * 100:g}% 회복"
+                f"鲸之歌: 붕괴 처치 시 최대 HP의 {heal * 100:g}% 회복"
                 f"(재사용 대기시간 {cooldown:g}초; 정식 처치 이벤트 없음)"
             ),
             scope="unknown",
@@ -463,14 +463,14 @@ def _rules_jiaojuan(selected: Any, factory: type[Any]) -> tuple[Any, ...]:
             selected,
             factory,
             suffix="jiaojuan-unbalance",
-            name="闪耀的每一天: 브레이크 강도",
+            name="闪耀的每一天: 붕괴 강도",
             modifiers=(_modifier("UnbalIntensityBase", unbalance),),
         ),
         _static(
             selected,
             factory,
             suffix="jiaojuan-topple-target",
-            name="闪耀的每一天: 브레이크 대상 피해",
+            name="闪耀的每一天: 붕괴 대상 피해",
             scope="unknown",
             modifiers=(_modifier(
                 "DamageUpGeneralBase",

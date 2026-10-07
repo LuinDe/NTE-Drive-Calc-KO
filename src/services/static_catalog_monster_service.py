@@ -346,8 +346,8 @@ class StaticCatalogMonsterService(
             self._value("방어 보너스", profile.get("defense_up"), FORMULA),
             self._value("방어 고정값", profile.get("defense_add"), FORMULA),
             self._value("방어 무시", profile.get("defense_ignore"), FORMULA),
-            self._value("브레이크 상한", profile.get("topple_limit"), FORMULA),
-            self._value("브레이크 회복", profile.get("topple_reduce_reset"), FORMULA),
+            self._value("붕괴 상한", profile.get("topple_limit"), FORMULA),
+            self._value("붕괴 회복", profile.get("topple_reduce_reset"), FORMULA),
             self._value(
                 "공격 티어",
                 "사용 불가 (schema v30에 공격 속성 필드 없음)",

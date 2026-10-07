@@ -115,7 +115,7 @@ class MonsterDetailView(QWidget):
             section for section in detail.sections if "프로필" in section.title
         )
         if profile_sections:
-            self.body.addWidget(section_title("전투 프로필", "HP, 방어, 브레이크, 저항"))
+            self.body.addWidget(section_title("전투 프로필", "HP, 방어, 붕괴, 저항"))
             world_sections = tuple(
                 section for section in profile_sections
                 if _profile_kind(section) == "world_level"
@@ -363,7 +363,7 @@ class MonsterDetailView(QWidget):
         stats = (
             ("生命", _join_profile(values, "HP 기본", "HP 보너스", "HP 고정값"), "#39d0d8"),
             ("防御", _join_profile(values, "방어 기본", "방어 보너스", "방어 고정값", "방어 무시"), "#58a6ff"),
-            ("倾陷", _join_profile(values, "브레이크 상한", "브레이크 회복"), "#e3b341"),
+            ("倾陷", _join_profile(values, "붕괴 상한", "붕괴 회복"), "#e3b341"),
             ("等级 / 难度", _value_text(values.get("몬스터 레벨")), "#a371f7"),
         )
         grid = QGridLayout()

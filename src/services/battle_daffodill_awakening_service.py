@@ -206,7 +206,7 @@ class BattleDaffodillAwakeningService:
                 value_confidence="高",
                 inference_basis=(
                     "추정된 QTE마다 1중첩씩 최대 2중첩까지 누적되며, 다음 추정된 E가 전부 소모합니다;"
-                    "고정 축은 E 통용 피해만 투영하며 불균형 게이지와 브레이크 시점은 역추정하지 않습니다."
+                    "고정 축은 E 통용 피해만 투영하며 불균형 게이지와 붕괴 시점은 역추정하지 않습니다."
                 ),
                 trigger_event_type="INFERRED_DAFFODILL_QTE_CONSUMED_BY_E",
                 evidence_action_ids=tuple((*stack_actions, action.action_id)),
@@ -376,7 +376,7 @@ class BattleDaffodillAwakeningService:
             result.append(BattleInferredBuffInterval(
                 interval_id=f"buff:daffodill:effect4:{hit.event_id}",
                 buff_asset_path="character_awaken:1054:Effect4",
-                buff_name=f"통찰·브레이크 피해 증가 ({window.stacks}중첩)",
+                buff_name=f"통찰·붕괴 피해 증가 ({window.stacks}중첩)",
                 source_effect_definition_id="character_awaken:1054:Effect4",
                 source_kind="confirmed_character_awakening_state",
                 source_character_id=DAFFODILL_CHARACTER_ID,
@@ -390,7 +390,7 @@ class BattleDaffodillAwakeningService:
                 value_confidence="高",
                 inference_basis=(
                     "Q 동작은 같은 대상에 통찰을 최대 2중첩까지 부여합니다; 4각은 중첩당,"
-                    "다포딜 본인의 브레이크 피해만 높입니다. 구간은 축에서 관측된 같은 대상의 브레이크 정산 묶음만 포함합니다."
+                    "다포딜 본인의 붕괴 피해만 높입니다. 구간은 축에서 관측된 같은 대상의 붕괴 정산 묶음만 포함합니다."
                 ),
                 trigger_event_type="INFERRED_DAFFODILL_INSIGHT_TOPPLE",
                 evidence_action_ids=window.action_ids,
@@ -454,7 +454,7 @@ class BattleDaffodillAwakeningService:
                 state_confidence="中",
                 value_confidence="高",
                 inference_basis=(
-                    "일반 각성 6개가 활성화되었습니다; 관측된 브레이크 정산 1마이크로초 후부터,"
+                    "일반 각성 6개가 활성화되었습니다; 관측된 붕괴 정산 1마이크로초 후부터,"
                     "플레이 설정에서 검증 가능한 불균형 상한/회복 속도에 따라 지속되며 시간 정지는 유효 시간을 소모하지 않습니다."
                 ),
                 trigger_event_type="INFERRED_DAFFODILL_RESONANCE_SIX_TOPPLE",

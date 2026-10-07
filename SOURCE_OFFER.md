@@ -2,6 +2,12 @@
 
 AGPL-3.0 §5, §13 이행을 위한 고지입니다.
 
+> **2026-10-07 갱신**: 릴리스 `v2.3.1-ko`의 파일을 교체했습니다(倾陷 용어를 '붕괴'로 통일, 그 밖의 변경 없음).
+> 현재 파일(패치 실행 파일 `b2757a3e…`)의 대응 소스는 이 갱신 커밋의 `src/`(태그 `v2.3.1-ko`)이고,
+> 교체 전 첫 배포판(`5b3e9cdd…`)의 대응 소스는 커밋 [`d392fae`](../../tree/d392fae225df8ec2f83243bb0d16bba21b07b018/src)에 그대로 남아 있습니다.
+> *2026-10-07: the `v2.3.1-ko` assets were replaced (倾陷 is now rendered as '붕괴'; nothing else changed).
+> The first build (`5b3e9cdd…`) corresponds to commit `d392fae`.*
+
 ## 상류 저작물 / Upstream
 
 - 저장소: https://github.com/hxwd94666/NTE-Drive-Calculator (옛 이름 `NTE-Drive-Calc`)

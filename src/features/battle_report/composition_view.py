@@ -232,9 +232,9 @@ class BattleDamageCompositionPanel(QWidget):
         )
         header.addWidget(badge)
         description = QLabel(
-            "브레이크 캐릭터별 공식이 아직 로드되지 않음"
+            "붕괴 캐릭터별 공식이 아직 로드되지 않음"
             if composition.pending_topple_attribution
-            else "브레이크에 명확한 대상 또는 공식 근거가 없음"
+            else "붕괴에 명확한 대상 또는 공식 근거가 없음"
             if composition.unresolved_topple_attribution
             else "완전하고 정상적으로 귀속된 전투 리포트라면 여기는 0이어야 합니다"
         )

@@ -55,7 +55,7 @@ class BattleNativePageService:
             raise NativeAnalysisError('전투 리포트 페이지에는 데이터베이스 직접 읽기를 지원하는 분석 구성 요소가 필요합니다. 호환 버전을 배포한 뒤 다시 시도하세요')
         if (request.detail_level == 'composition'
                 and not getattr(self._client, 'supports_topple_composition', False)):
-            raise NativeAnalysisError('현재 분석 컴포넌트는 브레이크 귀속의 단독 계산을 지원하지 않습니다. 호환 분석 컴포넌트를 업데이트해 주세요')
+            raise NativeAnalysisError('현재 분석 컴포넌트는 붕괴 귀속의 단독 계산을 지원하지 않습니다. 호환 분석 컴포넌트를 업데이트해 주세요')
         dependencies = self._dependencies
         if dependencies.static_database_path is None:
             raise ValueError('네이티브 전투 리포트 분석에 정적 데이터 경로가 없습니다')
@@ -95,9 +95,9 @@ class BattleNativePageService:
             message = _PROGRESS_MESSAGES[event['phase']]
             if request.detail_level == 'composition':
                 message = {
-                    'target': '브레이크 대상 증거를 읽는 중…',
-                    'analyze': '현재 구간의 브레이크 귀속을 계산하는 중…',
-                    'details': '브레이크 귀속 결과를 정리하는 중…',
+                    'target': '붕괴 대상 증거를 읽는 중…',
+                    'analyze': '현재 구간의 붕괴 귀속을 계산하는 중…',
+                    'details': '붕괴 귀속 결과를 정리하는 중…',
                 }.get(event['phase'], message)
             report_battle_analysis_progress(
                 publish, phase=event['phase'],
