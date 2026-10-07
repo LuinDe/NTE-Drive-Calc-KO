@@ -235,7 +235,7 @@ def _build_action(
     )
     identity_confidence = (
         "中"
-        if first.ability_id.startswith("GA_") and "미식별" not in first.skill_name
+        if first.ability_id.startswith("GA_") and "미식별" not in first.skill_name and "未识别" not in first.skill_name
         else "低"
     )
     godslayer = any(

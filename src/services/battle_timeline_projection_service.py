@@ -89,7 +89,7 @@ def _damage_source_key(hit: BattleAnalysisHit) -> str:
         return f"{hit.ability_id}|{mode}"
     if hit.ability_id:
         return hit.ability_id
-    if hit.skill_name and "미식별" not in hit.skill_name:
+    if hit.skill_name and "미식별" not in hit.skill_name and "未识别" not in hit.skill_name:
         return hit.skill_name
     return f"{hit.skill_name}|{hit.damage_name}|{hit.gameplay_effect_id}"
 

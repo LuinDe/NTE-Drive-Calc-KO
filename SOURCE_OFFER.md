@@ -2,8 +2,17 @@
 
 AGPL-3.0 §5, §13 이행을 위한 고지입니다.
 
+> **2026-10-08 갱신**: 릴리스 `v2.3.1-ko`의 파일을 다시 교체했습니다(전투 리포트의 일반 공격·미식별 스킬 판정과
+> 플러그인 상태 배지 수정, 소스 8개 파일).
+> 현재 파일(패치 실행 파일 `5392858a…`)의 대응 소스는 이 갱신 커밋의 `src/`(태그 `v2.3.1-ko`)입니다.
+> 10-07 붕괴 갱신판(`b2757a3e…`)의 대응 소스는 커밋 [`8fdc5db`](../../tree/8fdc5dba2dd2471cc70e656997e945f2bba2e1f8/src),
+> 10-07 첫 배포판(`5b3e9cdd…`)의 대응 소스는 커밋 [`d392fae`](../../tree/d392fae225df8ec2f83243bb0d16bba21b07b018/src)에 그대로 남아 있습니다.
+> *2026-10-08: the `v2.3.1-ko` assets were replaced again (battle-report normal-attack and unidentified-skill checks,
+> plugin status badge; 8 source files). The current build (`5392858a…`) corresponds to this commit (tag `v2.3.1-ko`),
+> `b2757a3e…` to commit `8fdc5db`, and the first build `5b3e9cdd…` to commit `d392fae`.*
+
 > **2026-10-07 갱신**: 릴리스 `v2.3.1-ko`의 파일을 교체했습니다(倾陷 용어를 '붕괴'로 통일, 그 밖의 변경 없음).
-> 현재 파일(패치 실행 파일 `b2757a3e…`)의 대응 소스는 이 갱신 커밋의 `src/`(태그 `v2.3.1-ko`)이고,
+> 그때 파일(패치 실행 파일 `b2757a3e…`)의 대응 소스는 커밋 [`8fdc5db`](../../tree/8fdc5dba2dd2471cc70e656997e945f2bba2e1f8/src)의 `src/`이고,
 > 교체 전 첫 배포판(`5b3e9cdd…`)의 대응 소스는 커밋 [`d392fae`](../../tree/d392fae225df8ec2f83243bb0d16bba21b07b018/src)에 그대로 남아 있습니다.
 > *2026-10-07: the `v2.3.1-ko` assets were replaced (倾陷 is now rendered as '붕괴'; nothing else changed).
 > The first build (`5b3e9cdd…`) corresponds to commit `d392fae`.*
@@ -42,6 +51,8 @@ tag; reproduce against this exact commit.*
    `ui/controllers/native_plugin_deployment_ui.py`. 게임 폴더에 컴포넌트를 배포·정리할 때 이 프로그램이 배포한
    파일(공식 빌드 해시 또는 배포 기록 해시)만 덮어쓰거나 지우고, 다른 프로그램의 파일(예: ReShade의
    `d3d12.dll`, 다른 모드의 `dwmapi.dll`)은 남겨 둔 채 알립니다.
+10. 비교에 쓰이는 원문 값 허용 — 번역으로 비교 대상 문자열이 한국어로 바뀐 판정(전투 리포트의 공격 종류 `普通攻击`,
+    미식별 스킬 `未识别`, 플러그인 상태 배지)이 원문 값도 받도록 수정했습니다. 화면에는 한국어가 그대로 표시됩니다.
 
 번역해서는 안 되는 문자열(데이터베이스 `*_zh` 값, OCR 별칭 사전, 센티널 비교 대상)은 파일·줄
 단위 보호 규칙으로 원문을 유지했습니다.

@@ -198,7 +198,7 @@ def _confirmed_source_tags_apply(
     ).casefold()
     channel_id = classify_battle_hit_channel(hit)[0]
     is_melee = (
-        attack_type in {"普攻", "일반 공격", "normal", "normalattack", "melee", "a"}
+        attack_type in {"普攻", "일반 공격", "普通攻击", "normal", "normalattack", "melee", "a"}
         or "_melee" in hit.ability_id.casefold()
     ) and "ultraskill" not in identity
     is_ultra = attack_type in {"q技能", "ultra"} or "ultraskill" in identity

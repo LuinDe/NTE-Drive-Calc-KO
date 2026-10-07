@@ -424,7 +424,7 @@ def _fine_hit_channel(
             "_skill" in identity_text and "ultraskill" not in identity_text
         ):
             family = "E"
-        elif attack in {"普攻", "일반 공격", "normal", "normalattack", "melee", "a"}:
+        elif attack in {"普攻", "일반 공격", "普通攻击", "normal", "normalattack", "melee", "a"}:
             family = "A"
         else:
             family = ""

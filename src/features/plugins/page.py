@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 
 from src.app.theme import theme_color
 
+# Korean patch (fix_logic_ko231b P1): plugin statuses whose Korean wording keeps no badge marker.  Upstream
+# classifies the Chinese text (不支持 / 更新配套 / 需要更新 -> 组件需更新); these statuses are classified by their
+# Chinese source, so the badge is the upstream one while the Korean text is shown.
+_STATUS_SOURCE_ZH = {
+    "D3D 호스트를 업데이트해야 합니다. 게임을 종료한 뒤 전체 세트를 함께 배포하세요.": "D3D 宿主需要更新，请退出游戏后成套部署。",
+}
+
 
 class _ToggleSwitch(QCheckBox):
     """Paint a compact switch while retaining checkbox keyboard semantics."""
@@ -136,6 +143,8 @@ class PluginsPage(QWidget):
             return "연결 대기 중", "active"
         if raw in {"현재 모드에서 활성화 불가", "연결 일시 중지됨"}:
             return raw, "warning"
+        if any(marker in _STATUS_SOURCE_ZH.get(raw, "") for marker in ("不支持", "更新配套", "需要更新")):
+            return "컴포넌트 업데이트 필요", "error"
         if "지원하지 않" in raw or "미지원" in raw or "구성 패키지 업데이트" in raw or "업데이트 필요" in raw or "不支持" in raw or "更新配套" in raw or "需要更新" in raw:
             return "컴포넌트 업데이트 필요", "error"
         if "실패" in raw or raw:
